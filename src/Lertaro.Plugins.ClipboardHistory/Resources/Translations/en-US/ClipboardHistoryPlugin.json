@@ -1,0 +1,23 @@
+{
+  "ClipboardHistory_Config_Group_General": "General",
+  "ClipboardHistory_Config_Hotkey_Label": "Global hotkey to open clipboard history",
+  "ClipboardHistory_Config_Hotkey_Desc": "Type the combination as text, e.g. Win+V, Ctrl+Shift+V, Ctrl+`. The plugin registers it itself, so Win combinations the host rejects still work. Note: if Windows clipboard history is enabled, Win+V is taken by the system. Applying takes effect immediately, no restart needed.",
+  "ClipboardHistory_Config_Keywords_Label": "Trigger keywords",
+  "ClipboardHistory_Config_Keywords_Desc": "Type one of these (optionally followed by a filter) to list clipboard history, e.g. \"cb token\". One per line.",
+  "ClipboardHistory_Config_MaxEntries_Label": "Maximum retained entries",
+  "ClipboardHistory_Config_MaxEntries_Desc": "Oldest entries are evicted first (pinned entries last). Default 5000, about 6 MB of memory. Restart the host after changing.",
+  "ClipboardHistory_Config_RetentionDays_Label": "Retention days",
+  "ClipboardHistory_Config_RetentionDays_Desc": "Unpinned entries older than this are evicted. Use 0 to disable time-based eviction. Restart the host after changing.",
+  "ClipboardHistory_Config_Pause_Label": "Pause capture",
+  "ClipboardHistory_Config_Pause_Desc": "Stop capturing new clipboard content (existing history stays searchable). Useful while handling sensitive data.",
+  "ClipboardHistory_Config_ShowSource_Label": "Show source process",
+  "ClipboardHistory_Config_ShowSource_Desc": "Show the name of the process the content was copied from in each entry's subtitle.",
+  "ClipboardHistory_Config_CaptureImages_Label": "Capture images",
+  "ClipboardHistory_Config_CaptureImages_Desc": "Copied or screenshot images are stored as PNG in the plugin data folder (images subfolder), shown as thumbnails in the panel and written back on Enter. Turn off to ignore images.",
+  "ClipboardHistory_Config_MaxImageMB_Label": "Max image size (MB)",
+  "ClipboardHistory_Config_MaxImageMB_Desc": "Images larger than this are skipped. Default 20 MB, range 1-200.",
+  "ClipboardHistory_Config_PersistHistory_Label": "Keep history across restarts",
+  "ClipboardHistory_Config_PersistHistory_Desc": "Save history (including full text and images) to history.json in the plugin data folder and restore it on startup. Note: text is stored as plain JSON on local disk; use \"Pause capture\" for sensitive content. Turn off to clear history on restart.",
+  "ClipboardHistory_Config_HoverPreview_Label": "Hover preview",
+  "ClipboardHistory_Config_HoverPreview_Desc": "Hovering an entry for about half a second opens a flyout with scrollable full text (selectable, Ctrl+C to copy) or a large image preview. Short entries already fully visible in the list do not pop up. Turn off to disable flyouts."
+}

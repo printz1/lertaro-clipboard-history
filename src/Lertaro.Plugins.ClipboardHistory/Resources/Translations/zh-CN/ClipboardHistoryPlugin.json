@@ -1,0 +1,23 @@
+{
+  "ClipboardHistory_Config_Group_General": "常规",
+  "ClipboardHistory_Config_Hotkey_Label": "打开剪贴板历史的全局热键",
+  "ClipboardHistory_Config_Hotkey_Desc": "直接填写组合键文本，例如 Win+V、Ctrl+Shift+V、Ctrl+`。由插件自己注册，所以宿主不认的 Win 组合也能用。注意：若已开启 Windows 自带的剪贴板历史，Win+V 会被系统占用。改完点应用立即生效，无需重启。",
+  "ClipboardHistory_Config_Keywords_Label": "触发词",
+  "ClipboardHistory_Config_Keywords_Desc": "在搜索框输入这些词（可跟过滤词）即可调出剪贴板历史，例如输入 “cb token”。每行一个。",
+  "ClipboardHistory_Config_MaxEntries_Label": "最多保留条目数",
+  "ClipboardHistory_Config_MaxEntries_Desc": "超过后从最旧的开始淘汰（已固定的条目最后淘汰）。默认 5000，约占用 6 MB 内存。修改后需重启宿主生效。",
+  "ClipboardHistory_Config_RetentionDays_Label": "保留天数",
+  "ClipboardHistory_Config_RetentionDays_Desc": "超过这个天数的未固定条目会被淘汰。填 0 表示不按时间淘汰。修改后需重启宿主生效。",
+  "ClipboardHistory_Config_Pause_Label": "暂停记录",
+  "ClipboardHistory_Config_Pause_Desc": "打开后停止抓取新的剪贴板内容（已有历史仍可查询），处理敏感内容时用。",
+  "ClipboardHistory_Config_ShowSource_Label": "显示来源进程",
+  "ClipboardHistory_Config_ShowSource_Desc": "在每条记录的副标题里显示复制时所在的进程名。",
+  "ClipboardHistory_Config_CaptureImages_Label": "记录图片",
+  "ClipboardHistory_Config_CaptureImages_Desc": "复制或截图的图片会以 PNG 形式存入历史（存放在插件数据目录的 images 文件夹），面板里显示缩略图，回车后写回剪贴板。关闭后图片不进历史。",
+  "ClipboardHistory_Config_MaxImageMB_Label": "单张图片大小上限 (MB)",
+  "ClipboardHistory_Config_MaxImageMB_Desc": "超过此大小的图片直接丢弃，不进历史。默认 20 MB，范围 1-200。",
+  "ClipboardHistory_Config_PersistHistory_Label": "重启后保留历史",
+  "ClipboardHistory_Config_PersistHistory_Desc": "把历史（含文本全文与图片）保存到插件数据目录的 history.json，重启宿主后自动恢复。注意：文本会以明文存放在本机磁盘，对保密要求高的内容请配合“暂停记录”使用。关闭此项则重启即清空。",
+  "ClipboardHistory_Config_HoverPreview_Label": "悬停预览",
+  "ClipboardHistory_Config_HoverPreview_Desc": "鼠标停在条目上约半秒弹出浮窗，可滚动查看全文、选中并复制，图片显示大图。行内已经能看全的短内容不会弹。关闭后悬停无任何浮窗。"
+}

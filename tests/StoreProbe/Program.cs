@@ -133,6 +133,56 @@ for (var i = 0; i < 5; i++)
 Console.WriteLine("zero retention: count=" + noExpiry.Count);
 Console.WriteLine(noExpiry.Count == 5 ? "ZERO RETENTION UNLIMITED = PASS" : "ZERO RETENTION UNLIMITED = FAIL");
 
+// ---- 待办 / 置顶时限 / 提醒 ----
+var plan = new ClipboardStore(100, TimeSpan.FromDays(30));
+plan.Add("todo-item", "probe");
+var planId = plan.Snapshot()[0].Id;
+Console.WriteLine("toggle todo -> " + plan.ToggleTodo(planId));
+var planEntry = plan.Snapshot().First(e => e.Id == planId);
+Console.WriteLine("todo state: pinned=" + planEntry.IsPinned + " until=" + (planEntry.PinnedUntil is null ? "none" : "set"));
+
+// 提醒：设为过去时刻，CollectDue 应立即消费并清空 RemindAt
+plan.SetReminder(planId, DateTime.Now.AddSeconds(-1));
+var due = new List<ClipboardDueEvent>();
+var changed = plan.CollectDue(DateTime.Now, due);
+var after = plan.Snapshot().First(e => e.Id == planId);
+Console.WriteLine("collect: changed=" + changed + " events=" + due.Count + " remindCleared=" + (after.RemindAt is null));
+Console.WriteLine(changed && due.Count == 1 && due[0].Kind == ClipboardDueKind.Remind && after.RemindAt is null
+    ? "TODO REMINDER = PASS"
+    : "TODO REMINDER = FAIL");
+
+// 置顶到期：同样一次性消费并取消置顶
+plan.SetPin(planId, DateTime.Now.AddSeconds(-1));
+var due2 = new List<ClipboardDueEvent>();
+plan.CollectDue(DateTime.Now, due2);
+var after2 = plan.Snapshot().First(e => e.Id == planId);
+Console.WriteLine("pin expire: events=" + due2.Count + " pinned=" + after2.IsPinned);
+Console.WriteLine(due2.Count == 1 && due2[0].Kind == ClipboardDueKind.PinExpired && !after2.IsPinned
+    ? "PIN EXPIRY = PASS"
+    : "PIN EXPIRY = FAIL");
+
+// 待办豁免淘汰：容量 3 的库里塞 9 条，待办项必须仍在
+var todoTrim = new ClipboardStore(3, TimeSpan.FromDays(30));
+todoTrim.Add("todo-keep", "probe");
+var todoId = todoTrim.Snapshot()[0].Id;
+todoTrim.ToggleTodo(todoId);
+for (var i = 0; i < 8; i++)
+{
+    todoTrim.Add("filler2-" + i, "probe");
+}
+
+var todoKept = false;
+foreach (var e in todoTrim.Snapshot())
+{
+    if (e.Id == todoId)
+    {
+        todoKept = true;
+    }
+}
+
+Console.WriteLine("todo trim exemption: count=" + todoTrim.Count + " kept=" + todoKept);
+Console.WriteLine(todoTrim.Count == 3 && todoKept ? "TODO TRIM EXEMPTION = PASS" : "TODO TRIM EXEMPTION = FAIL");
+
 Console.WriteLine(textOk == 2 && imageOk == 2 ? "RESULT = PASS" : "RESULT = FAIL (textOk=" + textOk + " imageOk=" + imageOk + ")");
 
 // ---- phase 3.5: from: 来源筛选 ----

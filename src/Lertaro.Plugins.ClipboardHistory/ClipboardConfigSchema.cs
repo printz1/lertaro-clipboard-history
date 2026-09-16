@@ -21,6 +21,8 @@ internal static class ClipboardConfigSchema
     internal const string KeyMaxImageMB = "MaxImageMB";
     internal const string KeyPersistHistory = "PersistHistory";
     internal const string KeyHoverPreview = "HoverPreview";
+    internal const string KeyReminderSound = "ReminderSound";
+    internal const string KeySortTodosByDue = "SortTodosByDue";
 
     internal static PluginConfigSchema Build(
         ClipboardSettings current,
@@ -122,7 +124,25 @@ internal static class ClipboardConfigSchema
                     ConfigFieldType.Boolean,
                     current.HoverPreview,
                     () => staged.HoverPreview,
-                    value => staged.HoverPreview = value is bool b && b)
+                    value => staged.HoverPreview = value is bool b && b),
+
+                NewField(
+                    KeyReminderSound,
+                    "ClipboardHistory_Config_ReminderSound_Label",
+                    "ClipboardHistory_Config_ReminderSound_Desc",
+                    ConfigFieldType.Boolean,
+                    current.ReminderSound,
+                    () => staged.ReminderSound,
+                    value => staged.ReminderSound = value is bool b && b),
+
+                NewField(
+                    KeySortTodosByDue,
+                    "ClipboardHistory_Config_SortTodosByDue_Label",
+                    "ClipboardHistory_Config_SortTodosByDue_Desc",
+                    ConfigFieldType.Boolean,
+                    current.SortTodosByDue,
+                    () => staged.SortTodosByDue,
+                    value => staged.SortTodosByDue = value is bool b && b)
             ],
             OnSave = onSave,
             OnRollback = onRollback

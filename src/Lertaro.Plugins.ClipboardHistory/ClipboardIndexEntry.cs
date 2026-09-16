@@ -118,6 +118,17 @@ internal sealed class ClipboardIndexEntry
     /// </summary>
     internal bool IsFavorite { get; set; }
 
+    /// <summary>
+    /// 待办：默认永久置顶，且与收藏同级豁免淘汰（未完成的事不该被清掉），可设提醒时间。
+    /// </summary>
+    internal bool IsTodo { get; set; }
+
+    /// <summary>置顶到期时间。null = 无期限置顶（仅排序）。</summary>
+    internal DateTime? PinnedUntil { get; set; }
+
+    /// <summary>提醒时间（单次）。到点触发一次提醒后由 Store 清空。</summary>
+    internal DateTime? RemindAt { get; set; }
+
     // ---- 图片专属（文本条目为默认值） ----
 
     internal string ImagePath { get; } = string.Empty;
@@ -143,13 +154,27 @@ internal sealed class ClipboardIndexEntry
                 text += "  ·  " + SourceProcess;
             }
 
-            if (IsFavorite)
+            if (IsTodo)
+            {
+                text = "待办  ·  " + text;
+            }
+            else if (IsFavorite)
             {
                 text = "已收藏  ·  " + text;
             }
             else if (IsPinned)
             {
                 text = "已固定  ·  " + text;
+            }
+
+            if (RemindAt is { } remind)
+            {
+                text += "  ·  提醒 " + remind.ToString("MM-dd HH:mm");
+            }
+
+            if (PinnedUntil is { } until)
+            {
+                text += "  ·  置顶至 " + until.ToString("MM-dd HH:mm");
             }
 
             return text;

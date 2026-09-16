@@ -35,6 +35,65 @@ public sealed class ClipboardHistoryPlugin : IPlugin, IInstantResultProvider, IA
     /// <summary>供面板读取当前历史（面板是插件的一部分，同进程内直接取）。</summary>
     internal static ClipboardStore? Store => _store;
 
+    private static ClipboardReminderService? _reminders;
+
+    /// <summary>
+    /// 提醒调度（精准单次定时器，不做周期扫描）。
+    /// 首次访问时创建 —— 需要 WPF Dispatcher 才能弹浮窗，因此等到 Application.Current 就绪。
+    /// </summary>
+    internal static ClipboardReminderService? Reminders
+    {
+        get
+        {
+            if (_reminders is null && _store is not null)
+            {
+                var dispatcher = System.Windows.Application.Current?.Dispatcher;
+                if (dispatcher is null)
+                {
+                    return null;
+                }
+
+                _reminders = new ClipboardReminderService(_store, dispatcher);
+            }
+
+            return _reminders;
+        }
+    }
+
+    /// <summary>
+    /// 启动阶段把定时器对准最近到期时刻。宿主 UI 尚未就绪时（Application.Current 为空）
+    /// 隔 2 秒重试，最多 <paramref name="attempts"/> 次；成功或放弃后不再参与运行期。
+    /// </summary>
+    private static void ArmRemindersWithRetry(int attempts)
+    {
+        var left = attempts;
+        System.Threading.Timer? retry = null;
+
+        retry = new System.Threading.Timer(
+            _ =>
+            {
+                var reminders = Reminders;
+                if (reminders is not null)
+                {
+                    reminders.Arm();
+                    ClipboardListener.Log(
+                        "reminders armed (next=" + (_store?.NextDeadline()?.ToString("MM-dd HH:mm:ss") ?? "none") + ")",
+                        LogLevel.Debug);
+                    retry?.Dispose(); // 就绪即停：运行期不再有任何周期性任务
+                    return;
+                }
+
+                if (--left <= 0)
+                {
+                    ClipboardListener.Log("reminders not armed: dispatcher unavailable", LogLevel.Warn);
+                    retry?.Dispose();
+                }
+            },
+            null,
+            TimeSpan.FromSeconds(2),
+            TimeSpan.FromSeconds(2));
+    }
+
     public string Name => "剪贴板历史";
 
     public string Description => "记录复制过的文本、图片与文件，输入 cb 或 clip 调用；文本持久化为 JSON，图片以 PNG 存于数据目录。";
@@ -126,6 +185,10 @@ public sealed class ClipboardHistoryPlugin : IPlugin, IInstantResultProvider, IA
                     PersistIntervalMs,
                     PersistIntervalMs);
             }
+
+            // 提醒调度启动：等宿主 UI 就绪后对准最近一次到期时刻（有就立即触发，完成"睡过头"补偿）。
+            // 只在启动阶段重试几次，正常运行期间没有任何周期扫描。
+            ArmRemindersWithRetry(5);
 
             try
             {

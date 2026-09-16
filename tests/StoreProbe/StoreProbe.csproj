@@ -17,6 +17,7 @@
 
     <Compile Include="..\..\src\Lertaro.Plugins.ClipboardHistory\NativeMethods.cs" />
     <Compile Include="..\..\src\Lertaro.Plugins.ClipboardHistory\ClipboardIndexEntry.cs" />
+    <Compile Include="..\..\src\Lertaro.Plugins.ClipboardHistory\ClipboardDueEvent.cs" />
     <Compile Include="..\..\src\Lertaro.Plugins.ClipboardHistory\ClipboardStore.cs" />
     <Compile Include="..\..\src\Lertaro.Plugins.ClipboardHistory\ClipboardReader.cs" />
     <Compile Include="..\..\src\Lertaro.Plugins.ClipboardHistory\ClipboardSettings.cs" />

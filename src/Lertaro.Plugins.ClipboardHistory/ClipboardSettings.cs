@@ -72,6 +72,12 @@ internal sealed class ClipboardSettings
     /// <summary>悬停预览浮窗：鼠标停在条目上弹出全文/大图。关闭后悬停无浮窗。</summary>
     public bool HoverPreview { get; set; } = true;
 
+    /// <summary>提醒提示音（系统"提醒"音，跟随系统音量与静音）。</summary>
+    public bool ReminderSound { get; set; } = true;
+
+    /// <summary>待办按紧急度排序：临近时间越近越靠上（已错过的排最顶）。</summary>
+    public bool SortTodosByDue { get; set; } = true;
+
     internal ClipboardSettings Clone() => new()
     {
         Hotkey = Hotkey,
@@ -83,7 +89,9 @@ internal sealed class ClipboardSettings
         CaptureImages = CaptureImages,
         MaxImageMB = MaxImageMB,
         PersistHistory = PersistHistory,
-        HoverPreview = HoverPreview
+        HoverPreview = HoverPreview,
+        ReminderSound = ReminderSound,
+        SortTodosByDue = SortTodosByDue
     };
 
     /// <summary>把副本的规范化结果写回当前设置并落盘。</summary>
@@ -101,6 +109,8 @@ internal sealed class ClipboardSettings
             MaxImageMB = Math.Clamp(staged.MaxImageMB, 1, 200);
             PersistHistory = staged.PersistHistory;
             HoverPreview = staged.HoverPreview;
+            ReminderSound = staged.ReminderSound;
+            SortTodosByDue = staged.SortTodosByDue;
             _current = this;
         }
 

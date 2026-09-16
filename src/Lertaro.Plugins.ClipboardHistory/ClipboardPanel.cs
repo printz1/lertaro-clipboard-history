@@ -278,7 +278,7 @@ internal static class ClipboardPanel
             TextAlignment = TextAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Opacity = 0.65,
-            Text = "↑↓ 选择 · Enter 粘贴 · 悬停看全文 · from:来源 筛选 · Ctrl+F 收藏 · Ctrl+P 固定 · Ctrl+Del 删除"
+            Text = "↑↓ 选择 · Enter 粘贴 · 右键更多操作 · 悬停看全文 · Ctrl+F 收藏 · Ctrl+T 待办 · Ctrl+P 固定 · Ctrl+Del 删除"
         };
 
         // ---- 中部：列表（行高固定两行；全文走悬停浮窗，业内通行的 Ditto/CopyQ 模式）----
@@ -358,6 +358,11 @@ internal static class ClipboardPanel
 
                 case Key.F when (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control:
                     ToggleFavorite(store);
+                    e.Handled = true;
+                    break;
+
+                case Key.T when (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control:
+                    ToggleTodo(store);
                     e.Handled = true;
                     break;
 
@@ -557,6 +562,7 @@ internal static class ClipboardPanel
         // 一次遍历同时完成：类型过滤、固定/普通拆组、渲染签名。
         // 签名与上次一致就不动视觉树（输错又删掉、Ctrl+P 后同序等场景），整棵子树重建就此免掉。
         var favorites = new List<ClipboardIndexEntry>();
+        var todos = new List<ClipboardIndexEntry>();
         var pinned = new List<ClipboardIndexEntry>();
         var normal = new List<ClipboardIndexEntry>();
         var signature = new StringBuilder(512);
@@ -581,7 +587,7 @@ internal static class ClipboardPanel
 
             visible++;
             signature.Append(entry.Id).Append(',');
-            (entry.IsFavorite ? favorites : entry.IsPinned ? pinned : normal).Add(entry);
+            (entry.IsTodo ? todos : entry.IsFavorite ? favorites : entry.IsPinned ? pinned : normal).Add(entry);
         }
 
         signature.Append('|').Append(visible).Append('|').Append(store.PinnedCount);
@@ -603,7 +609,17 @@ internal static class ClipboardPanel
             Rows.Clear();
             _highlighted = null;
 
-            // 收藏组永远在最上（永久保留的条目），其次是固定组，然后是时间分组
+            // 分组顺序：待办（最紧急）→ 收藏（永久保留）→ 固定（仅排序）→ 时间分组
+            if (todos.Count > 0)
+            {
+                SortTodos(todos);
+                _list.Items.Add(MakeGroupHeader("待办", todos.Count, store, clickable: false));
+                foreach (var entry in todos)
+                {
+                    AddRow(entry, store);
+                }
+            }
+
             if (favorites.Count > 0)
             {
                 _list.Items.Add(MakeGroupHeader("收藏", favorites.Count, store, clickable: false));
@@ -1148,6 +1164,7 @@ internal static class ClipboardPanel
         };
 
         AttachHoverFlyout(item, entry, store);
+        item.ContextMenu = BuildRowMenu(entry, store);
 
         return (item, accent, thumbnail);
     }
@@ -1990,6 +2007,192 @@ internal static class ClipboardPanel
         Refresh(store);
     }
 
+    // ---- 待办 / 置顶时限 / 提醒 ----
+
+    /// <summary>Ctrl+T：标记/取消待办（默认永久置顶，且豁免淘汰）。</summary>
+    private static void ToggleTodo(ClipboardStore store)
+    {
+        if (_list?.SelectedItem is not ListBoxItem { Tag: ClipboardIndexEntry entry })
+        {
+            return;
+        }
+
+        var todo = store.ToggleTodo(entry.Id);
+        ClipboardListener.Log("entry " + entry.Id + " todo=" + todo, LogLevel.Debug);
+        ClipboardHistoryPlugin.Reminders?.Arm();
+        Refresh(store);
+    }
+
+    private static void ApplyPin(ClipboardStore store, ClipboardIndexEntry entry, DateTime? until)
+    {
+        store.SetPin(entry.Id, until);
+        ClipboardHistoryPlugin.Reminders?.Arm();
+        Refresh(store);
+    }
+
+    private static void ApplyUnpin(ClipboardStore store, ClipboardIndexEntry entry)
+    {
+        store.ClearPin(entry.Id);
+        ClipboardHistoryPlugin.Reminders?.Arm();
+        Refresh(store);
+    }
+
+    private static void ApplyReminder(ClipboardStore store, ClipboardIndexEntry entry, DateTime? at)
+    {
+        store.SetReminder(entry.Id, at);
+        ClipboardHistoryPlugin.Reminders?.Arm();
+        Refresh(store);
+    }
+
+    /// <summary>
+    /// 待办排序（设置"按紧急度排序"开启时）：有提醒的按时间升序 ——
+    /// 越临近越靠上、已错过的排最顶；无提醒的按加入时间倒序排在其后。
+    /// </summary>
+    private static void SortTodos(List<ClipboardIndexEntry> todos)
+    {
+        if (!ClipboardSettings.Current.SortTodosByDue)
+        {
+            todos.Sort((a, b) => b.CreatedAt.CompareTo(a.CreatedAt));
+            return;
+        }
+
+        todos.Sort((a, b) =>
+        {
+            var left = a.RemindAt;
+            var right = b.RemindAt;
+            if (left is not null && right is not null)
+            {
+                return left.Value.CompareTo(right.Value);
+            }
+
+            if (left is not null)
+            {
+                return -1;
+            }
+
+            if (right is not null)
+            {
+                return 1;
+            }
+
+            return b.CreatedAt.CompareTo(a.CreatedAt);
+        });
+    }
+
+    /// <summary>
+    /// 右键菜单：鼠标路径的完整操作入口（与快捷键等价）。
+    /// 注意 ContextMenu 是独立视觉树，主题画刷要在菜单自己的资源里再注册一份。
+    /// </summary>
+    private static ContextMenu BuildRowMenu(ClipboardIndexEntry entry, ClipboardStore store)
+    {
+        var menu = new ContextMenu
+        {
+            Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint,
+            FontSize = 12.5,
+            Background = _themeSurface ?? SystemColors.WindowBrush,
+            BorderBrush = _themeBorderBrush ?? SystemColors.ControlDarkBrush,
+            Foreground = _themeText ?? SystemColors.ControlTextBrush
+        };
+
+        menu.Items.Add(NewMenuItem("粘贴到刚才的窗口", () => CopySelected(store)));
+
+        menu.Items.Add(NewMenuItem(entry.IsFavorite ? "取消收藏" : "收藏", () =>
+        {
+            store.ToggleFavorite(entry.Id);
+            Refresh(store);
+        }));
+
+        menu.Items.Add(NewMenuItem(entry.IsTodo ? "取消待办" : "标记待办", () =>
+        {
+            store.ToggleTodo(entry.Id);
+            ClipboardHistoryPlugin.Reminders?.Arm();
+            Refresh(store);
+        }));
+
+        var pin = new MenuItem { Header = "置顶" };
+        pin.Items.Add(NewMenuItem("永久", () => ApplyPin(store, entry, null)));
+        pin.Items.Add(NewMenuItem("10 分钟", () => ApplyPin(store, entry, DateTime.Now.AddMinutes(10))));
+        pin.Items.Add(NewMenuItem("1 小时", () => ApplyPin(store, entry, DateTime.Now.AddHours(1))));
+        pin.Items.Add(NewMenuItem("今天 18:00", () => ApplyPin(store, entry, TodayAt(18))));
+        pin.Items.Add(NewMenuItem("明天 9:00", () => ApplyPin(store, entry, DateTime.Today.AddDays(1).AddHours(9))));
+        if (entry.IsPinned)
+        {
+            pin.Items.Add(new Separator());
+            pin.Items.Add(NewMenuItem("取消置顶", () => ApplyUnpin(store, entry)));
+        }
+
+        menu.Items.Add(pin);
+
+        var remind = new MenuItem { Header = "提醒" };
+        remind.Items.Add(NewMenuItem("取消提醒", () => ApplyReminder(store, entry, null)));
+        remind.Items.Add(NewMenuItem("10 分钟后", () => ApplyReminder(store, entry, DateTime.Now.AddMinutes(10))));
+        remind.Items.Add(NewMenuItem("30 分钟后", () => ApplyReminder(store, entry, DateTime.Now.AddMinutes(30))));
+        remind.Items.Add(NewMenuItem("1 小时后", () => ApplyReminder(store, entry, DateTime.Now.AddHours(1))));
+        remind.Items.Add(NewMenuItem("今天 18:00", () => ApplyReminder(store, entry, TodayAt(18))));
+        remind.Items.Add(NewMenuItem("明天 9:00", () => ApplyReminder(store, entry, DateTime.Today.AddDays(1).AddHours(9))));
+        menu.Items.Add(remind);
+
+        menu.Items.Add(new Separator());
+        menu.Items.Add(NewMenuItem("删除", () =>
+        {
+            _ = store.Remove(entry.Id);
+            Refresh(store);
+        }));
+
+        return menu;
+    }
+
+    private static MenuItem NewMenuItem(string header, Action action)
+    {
+        var item = new MenuItem { Header = header };
+        item.Click += (_, _) => action();
+        return item;
+    }
+
+    /// <summary>今天某点；已过则顺延到明天同时刻。</summary>
+    private static DateTime TodayAt(int hour)
+    {
+        var at = DateTime.Today.AddHours(hour);
+        return at <= DateTime.Now ? at.AddDays(1) : at;
+    }
+
+    /// <summary>通知点击进入：打开面板并选中对应条目（被筛选隐藏时只打开面板）。</summary>
+    internal static void OpenTo(long entryId)
+    {
+        var store = ClipboardHistoryPlugin.Store;
+        if (store is null)
+        {
+            return;
+        }
+
+        ShowPanel();
+
+        foreach (var row in Rows)
+        {
+            if (row.Entry.Id != entryId)
+            {
+                continue;
+            }
+
+            if (_list is not null)
+            {
+                _list.SelectedItem = row.Container;
+                row.Container.BringIntoView();
+            }
+
+            break;
+        }
+    }
+
+    /// <summary>提醒/到期导致数据变化时刷新已打开的面板。</summary>
+    internal static void NotifyStoreChanged(ClipboardStore store)
+    {
+        if (_list is not null && _window is { IsVisible: true })
+        {
+            Refresh(store);
+        }
+    }
+
     private static bool PassesTypeFilter(ClipboardIndexEntry entry)
     {
         return _typeFilter switch
@@ -2066,9 +2269,20 @@ internal static class ClipboardPanel
             parts.Add(entry.SourceProcess!);
         }
 
-        if (entry.IsPinned)
+        if (entry.IsTodo)
         {
-            parts.Add("已固定");
+            parts.Add("待办");
+        }
+        else if (entry.IsPinned)
+        {
+            parts.Add(entry.PinnedUntil is { } pinUntil
+                ? "置顶至 " + pinUntil.ToString("MM-dd HH:mm")
+                : "已固定");
+        }
+
+        if (entry.RemindAt is { } remindAt)
+        {
+            parts.Add("提醒 " + remindAt.ToString("MM-dd HH:mm"));
         }
 
         return string.Join("  ·  ", parts);

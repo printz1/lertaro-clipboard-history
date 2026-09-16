@@ -70,6 +70,13 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool GetCursorPos(out POINT lpPoint);
 
+    /// <summary>系统"提醒"音（Asterisk）。跟随系统声音方案/音量/静音，零依赖。</summary>
+    internal const uint MbIconAsterisk = 0x00000040;
+
+    [DllImport("user32.dll", SetLastError = false)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool MessageBeep(uint uType);
+
     /// <summary>复制完成后把焦点还给用户原来所在的窗口，省掉一次手动切换。</summary>
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

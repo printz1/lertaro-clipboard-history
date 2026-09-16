@@ -19,5 +19,9 @@
   "ClipboardHistory_Config_PersistHistory_Label": "重启后保留历史",
   "ClipboardHistory_Config_PersistHistory_Desc": "把历史（含文本全文与图片）保存到插件数据目录的 history.json，重启宿主后自动恢复。注意：文本会以明文存放在本机磁盘，对保密要求高的内容请配合“暂停记录”使用。关闭此项则重启即清空。",
   "ClipboardHistory_Config_HoverPreview_Label": "悬停预览",
-  "ClipboardHistory_Config_HoverPreview_Desc": "鼠标停在条目上约半秒弹出浮窗，可滚动查看全文、选中并复制，图片显示大图。行内已经能看全的短内容不会弹。关闭后悬停无任何浮窗。"
+  "ClipboardHistory_Config_HoverPreview_Desc": "鼠标停在条目上约半秒弹出浮窗，可滚动查看全文、选中并复制，图片显示大图。行内已经能看全的短内容不会弹。关闭后悬停无任何浮窗。",
+  "ClipboardHistory_Config_ReminderSound_Label": "提醒提示音",
+  "ClipboardHistory_Config_ReminderSound_Desc": "待办提醒或置顶到期时播放系统“提醒”音（跟随系统音量与静音状态，系统静音时不会响）。",
+  "ClipboardHistory_Config_SortTodosByDue_Label": "待办按紧急度排序",
+  "ClipboardHistory_Config_SortTodosByDue_Desc": "待办分组内按临近时间排序：越接近提醒时刻的越靠上，已错过的排在最顶部；关闭后按加入时间倒序。"
 }

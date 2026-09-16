@@ -537,6 +537,171 @@ internal sealed class ClipboardStore
     }
 
     /// <summary>
+    /// 切换待办。标记待办时默认永久置顶（PinnedUntil 保持 null = 无期限）；
+    /// 取消待办同时取消置顶。待办与收藏同级豁免淘汰。
+    /// </summary>
+    internal bool ToggleTodo(long id)
+    {
+        lock (_gate)
+        {
+            var entry = _index.Find(e => e.Id == id);
+            if (entry is null)
+            {
+                return false;
+            }
+
+            entry.IsTodo = !entry.IsTodo;
+            if (entry.IsTodo)
+            {
+                if (!entry.IsPinned)
+                {
+                    entry.IsPinned = true;
+                    _pinnedCount++;
+                }
+
+                entry.PinnedUntil = null;
+            }
+            else
+            {
+                entry.RemindAt = null;
+                SetPinnedCore(entry, false, null);
+            }
+
+            _version++;
+            _dirty = true;
+            return entry.IsTodo;
+        }
+    }
+
+    /// <summary>设置置顶及其到期时间（null = 无期限）。</summary>
+    internal void SetPin(long id, DateTime? until)
+    {
+        lock (_gate)
+        {
+            var entry = _index.Find(e => e.Id == id);
+            if (entry is null)
+            {
+                return;
+            }
+
+            SetPinnedCore(entry, true, until);
+            _version++;
+            _dirty = true;
+        }
+    }
+
+    /// <summary>取消置顶（不动收藏/待办标记；待办会一并取消，避免"待办却不置顶"的矛盾状态）。</summary>
+    internal void ClearPin(long id)
+    {
+        lock (_gate)
+        {
+            var entry = _index.Find(e => e.Id == id);
+            if (entry is null)
+            {
+                return;
+            }
+
+            SetPinnedCore(entry, false, null);
+            entry.IsTodo = false;
+            _version++;
+            _dirty = true;
+        }
+    }
+
+    /// <summary>设置提醒时间（单次）。设提醒即视为待办并置顶。</summary>
+    internal void SetReminder(long id, DateTime? at)
+    {
+        lock (_gate)
+        {
+            var entry = _index.Find(e => e.Id == id);
+            if (entry is null)
+            {
+                return;
+            }
+
+            entry.RemindAt = at;
+            if (at is not null)
+            {
+                entry.IsTodo = true;
+                SetPinnedCore(entry, true, null);
+            }
+
+            _version++;
+            _dirty = true;
+        }
+    }
+
+    private void SetPinnedCore(ClipboardIndexEntry entry, bool pinned, DateTime? until)
+    {
+        if (entry.IsPinned != pinned)
+        {
+            entry.IsPinned = pinned;
+            _pinnedCount += pinned ? 1 : -1;
+        }
+
+        entry.PinnedUntil = pinned ? until : null;
+    }
+
+    /// <summary>最近的待触发时刻（提醒 / 置顶到期），供"精准单次定时器"对准；无待办项返回 null。</summary>
+    internal DateTime? NextDeadline()
+    {
+        lock (_gate)
+        {
+            DateTime? next = null;
+            foreach (var entry in _index)
+            {
+                if (entry.RemindAt is { } remind && (next is null || remind < next))
+                {
+                    next = remind;
+                }
+
+                if (entry.PinnedUntil is { } until && (next is null || until < next))
+                {
+                    next = until;
+                }
+            }
+
+            return next;
+        }
+    }
+
+    /// <summary>
+    /// 收集并消费所有到期项（提醒触发一次后清空，置顶到期后取消置顶）。
+    /// 返回 true 表示有状态变化（调用方需要刷新界面/重新对准定时器）。
+    /// </summary>
+    internal bool CollectDue(DateTime now, List<ClipboardDueEvent> sink)
+    {
+        lock (_gate)
+        {
+            var changed = false;
+            foreach (var entry in _index)
+            {
+                if (entry.RemindAt is { } remind && remind <= now)
+                {
+                    entry.RemindAt = null;
+                    sink.Add(new ClipboardDueEvent(ClipboardDueKind.Remind, entry.Id, entry.Preview, entry.Kind));
+                    changed = true;
+                }
+
+                if (entry.PinnedUntil is { } until && until <= now)
+                {
+                    SetPinnedCore(entry, false, null);
+                    sink.Add(new ClipboardDueEvent(ClipboardDueKind.PinExpired, entry.Id, entry.Preview, entry.Kind));
+                    changed = true;
+                }
+            }
+
+            if (changed)
+            {
+                _version++;
+                _dirty = true;
+            }
+
+            return changed;
+        }
+    }
+
+    /// <summary>
     /// 当前固定条数，用于底部状态显示与刷新签名。
     /// 计数器增量维护：面板每次刷新都会读它，之前用 <c>_index.Count(e =&gt; e.IsPinned)</c>
     /// 等于每次击键都在锁内全表扫一遍。
@@ -564,12 +729,13 @@ internal sealed class ClipboardStore
             var overCapacity = _index.Count > _capacity;
             var overBudget = _payloadChars > _payloadCharBudget;
 
-            // 收藏条目永不淘汰：从尾部往前找第一个可淘汰项。
-            // 置顶只影响排序，不再豁免过期/容量 —— 那是收藏的语义。
+            // 收藏与待办永不淘汰：从尾部往前找第一个可淘汰项。
+            // 置顶只影响排序，不再豁免过期/容量 —— 那是收藏/待办的语义。
             var victimIndex = -1;
             for (var i = _index.Count - 1; i >= 0; i--)
             {
-                if (!_index[i].IsFavorite)
+                var candidate = _index[i];
+                if (!candidate.IsFavorite && !candidate.IsTodo)
                 {
                     victimIndex = i;
                     break;
@@ -578,7 +744,7 @@ internal sealed class ClipboardStore
 
             if (victimIndex < 0)
             {
-                break; // 全是收藏，无可淘汰
+                break; // 全是收藏/待办，无可淘汰
             }
 
             var victim = _index[victimIndex];
@@ -675,6 +841,9 @@ internal sealed class ClipboardStore
         public long C { get; set; }         // CreatedAt.Ticks
         public bool X { get; set; }         // 已固定
         public bool F { get; set; }         // 已收藏（永久保留）
+        public bool TD { get; set; }        // 待办（T 已被文本全文占用）
+        public long? PU { get; set; }       // 置顶到期 ticks
+        public long? RA { get; set; }       // 提醒时刻 ticks
     }
 
     private sealed class PersistedState
@@ -716,7 +885,10 @@ internal sealed class ClipboardStore
                         S = entry.SourceProcess,
                         C = entry.CreatedAt.Ticks,
                         X = entry.IsPinned,
-                        F = entry.IsFavorite
+                        F = entry.IsFavorite,
+                        TD = entry.IsTodo,
+                        PU = entry.PinnedUntil?.Ticks,
+                        RA = entry.RemindAt?.Ticks
                     });
                 }
                 else if (entry.Kind == ClipboardEntryKind.File)
@@ -737,7 +909,10 @@ internal sealed class ClipboardStore
                         S = entry.SourceProcess,
                         C = entry.CreatedAt.Ticks,
                         X = entry.IsPinned,
-                        F = entry.IsFavorite
+                        F = entry.IsFavorite,
+                        TD = entry.IsTodo,
+                        PU = entry.PinnedUntil?.Ticks,
+                        RA = entry.RemindAt?.Ticks
                     });
                 }
                 else
@@ -759,7 +934,10 @@ internal sealed class ClipboardStore
                         S = entry.SourceProcess,
                         C = entry.CreatedAt.Ticks,
                         X = entry.IsPinned,
-                        F = entry.IsFavorite
+                        F = entry.IsFavorite,
+                        TD = entry.IsTodo,
+                        PU = entry.PinnedUntil?.Ticks,
+                        RA = entry.RemindAt?.Ticks
                     });
                 }
             }
@@ -885,6 +1063,9 @@ internal sealed class ClipboardStore
 
                 entry.IsPinned = item.X;
                 entry.IsFavorite = item.F;
+                entry.IsTodo = item.TD;
+                entry.PinnedUntil = item.PU is { } pu ? new DateTime(pu) : null;
+                entry.RemindAt = item.RA is { } ra ? new DateTime(ra) : null;
                 if (entry.IsPinned)
                 {
                     store._pinnedCount++;

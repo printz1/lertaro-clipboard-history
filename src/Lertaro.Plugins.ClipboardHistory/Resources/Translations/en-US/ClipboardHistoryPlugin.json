@@ -19,5 +19,9 @@
   "ClipboardHistory_Config_PersistHistory_Label": "Keep history across restarts",
   "ClipboardHistory_Config_PersistHistory_Desc": "Save history (including full text and images) to history.json in the plugin data folder and restore it on startup. Note: text is stored as plain JSON on local disk; use \"Pause capture\" for sensitive content. Turn off to clear history on restart.",
   "ClipboardHistory_Config_HoverPreview_Label": "Hover preview",
-  "ClipboardHistory_Config_HoverPreview_Desc": "Hovering an entry for about half a second opens a flyout with scrollable full text (selectable, Ctrl+C to copy) or a large image preview. Short entries already fully visible in the list do not pop up. Turn off to disable flyouts."
+  "ClipboardHistory_Config_HoverPreview_Desc": "Hovering an entry for about half a second opens a flyout with scrollable full text (selectable, Ctrl+C to copy) or a large image preview. Short entries already fully visible in the list do not pop up. Turn off to disable flyouts.",
+  "ClipboardHistory_Config_ReminderSound_Label": "Reminder sound",
+  "ClipboardHistory_Config_ReminderSound_Desc": "Play the system notification sound when a to-do reminder or pin expiry fires (follows system volume and mute state).",
+  "ClipboardHistory_Config_SortTodosByDue_Label": "Sort to-dos by urgency",
+  "ClipboardHistory_Config_SortTodosByDue_Desc": "Inside the to-do group, sort by due time: the closest reminder rises to the top and overdue items sit at the very top. Turn off to sort by creation time instead."
 }

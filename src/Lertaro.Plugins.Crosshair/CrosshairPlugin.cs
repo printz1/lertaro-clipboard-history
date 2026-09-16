@@ -149,16 +149,58 @@ public sealed class CrosshairPlugin : IPlugin, IInstantResultProvider, IActionPr
         ApplyVisibility();
     }
 
+    private static System.Windows.Threading.DispatcherTimer? _visibilityRetry;
+    private static int _visibilityRetries;
+
     private static void ApplyVisibility()
     {
-        if (CrosshairSettings.Current.Visible)
-        {
-            CrosshairOverlay.ShowOverlay();
-        }
-        else
+        if (!CrosshairSettings.Current.Visible)
         {
             CrosshairOverlay.HideOverlay();
+            return;
         }
+
+        // 关键：叠加窗也是 WPF Window，而 WPF 会把 Application.MainWindow 指向"第一个被实例化的
+        // Window"。插件在宿主自己的窗口之前加载，所以必须等宿主已经有窗口之后再建我们的窗口 ——
+        // 否则宿主"显示/激活快速窗"的逻辑会拿到错的 MainWindow（实测：宿主精简搜索窗唤不醒，
+        // 而完整面板正常；卸载本插件即恢复）。
+        if (!IsHostWindowReady())
+        {
+            ScheduleVisibilityRetry();
+            return;
+        }
+
+        _visibilityRetries = 0;
+        CrosshairOverlay.ShowOverlay();
+    }
+
+    private static bool IsHostWindowReady()
+    {
+        var app = System.Windows.Application.Current;
+        return app is not null && app.Windows.Count > 0;
+    }
+
+    /// <summary>宿主窗口尚未就绪时稍后重试（500ms 一次，最多 30 次 ≈ 15 秒）。</summary>
+    private static void ScheduleVisibilityRetry()
+    {
+        var app = System.Windows.Application.Current;
+        if (app is null || _visibilityRetry is not null || _visibilityRetries >= 30)
+        {
+            return;
+        }
+
+        _visibilityRetries++;
+        _visibilityRetry = new System.Windows.Threading.DispatcherTimer(
+            TimeSpan.FromMilliseconds(500),
+            System.Windows.Threading.DispatcherPriority.Background,
+            (_, _) =>
+            {
+                _visibilityRetry?.Stop();
+                _visibilityRetry = null;
+                ApplyVisibility();
+            },
+            app.Dispatcher);
+        _visibilityRetry.Start();
     }
 
     /// <summary>切换显示状态（动作菜单 / 触发结果入口）。写回设置以便重启后保持。</summary>

@@ -13,6 +13,15 @@ internal static class CrosshairHotkey
     private const int WmHotkey = 0x0312;
     private const int HotkeyId = 0xC501;
 
+    /// <summary>WS_POPUP：不显示标题栏/边框的顶层窗口。</summary>
+    private const int WsPopup = unchecked((int)0x80000000);
+
+    /// <summary>WS_EX_TOOLWINDOW：不出现在任务栏与 Alt+Tab。</summary>
+    private const int WsExToolWindow = 0x00000080;
+
+    /// <summary>WS_EX_NOACTIVATE：永不抢焦点。</summary>
+    private const int WsExNoActivate = 0x08000000;
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
@@ -53,19 +62,24 @@ internal static class CrosshairHotkey
 
         if (_source is null)
         {
-            var window = new Window
+            // 关键：用 HwndSource 直接建一个原生消息窗，**不要 new Window()**。
+            // WPF 会把 Application.MainWindow 指向"第一个被实例化的 Window"；插件在宿主自己的
+            // 窗口之前加载，一旦这里建了 WPF Window，宿主后面"显示/激活快速窗"的逻辑就会拿到
+            // 错的 MainWindow —— 实测表现为：宿主精简搜索窗唤不醒（完整面板仍正常），
+            // 卸载本插件即恢复。HwndSource 只产生原生 HWND，不进 Application.Windows。
+            var parameters = new HwndSourceParameters("LertaroCrosshairHotkey")
             {
+                WindowStyle = WsPopup,
+                ExtendedWindowStyle = WsExToolWindow | WsExNoActivate,
                 Width = 0,
                 Height = 0,
-                WindowStyle = WindowStyle.None,
-                ShowInTaskbar = false,
-                ShowActivated = false,
-                Visibility = Visibility.Hidden
+                PositionX = 0,
+                PositionY = 0
             };
-            window.Show();
-            _source = HwndSource.FromHwnd(new WindowInteropHelper(window).Handle);
+
+            _source = new HwndSource(parameters);
             _source.AddHook(WndProc);
-            // 消息窗口保持隐藏存活；不 Close（关了热键就没了）
+            // 消息窗保持存活；不 Dispose（注销热键后仍复用同一个 HWND）
         }
 
         if (RegisterHotKey(_source.Handle, HotkeyId, modifiers, virtualKey))

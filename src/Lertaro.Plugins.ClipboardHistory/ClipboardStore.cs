@@ -61,7 +61,9 @@ internal sealed class ClipboardStore
     {
         InstanceId = Interlocked.Increment(ref _instanceCounter);
         _capacity = Math.Max(1, capacity);
-        _maxAge = maxAge;
+        // 0 或负数 = 不限时（TimeSpan.MaxValue）。必须归一化：
+        // 否则 TimeSpan.Zero 会被 Trim 解释为"全部立即过期"，把非收藏记录清空。
+        _maxAge = maxAge <= TimeSpan.Zero ? TimeSpan.MaxValue : maxAge;
         _payloadCharBudget = Math.Max(1024, payloadCharBudget);
     }
 

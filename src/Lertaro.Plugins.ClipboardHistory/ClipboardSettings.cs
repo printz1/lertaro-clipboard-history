@@ -48,7 +48,8 @@ internal sealed class ClipboardSettings
 
     public int MaxEntries { get; set; } = 5000;
 
-    public int RetentionDays { get; set; } = 30;
+    /// <summary>保留天数。0 = 不限时（受 MaxEntries 兜底）。</summary>
+    public int RetentionDays { get; set; } = 90;
 
     /// <summary>暂停记录：临时处理敏感内容时用，不需要卸载插件。</summary>
     public bool PauseCapture { get; set; }

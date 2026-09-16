@@ -123,6 +123,16 @@ foreach (var e in tiny.Snapshot())
 Console.WriteLine("trim exemption: count=" + tiny.Count + " favoriteKept=" + favoriteKept);
 Console.WriteLine(tiny.Count == 3 && favoriteKept ? "FAVORITE TRIM EXEMPTION = PASS" : "FAVORITE TRIM EXEMPTION = FAIL");
 
+// 保留天数 0 = 不限时：TimeSpan.Zero 必须被归一化为"永不过期"，否则会被当成"全部立即过期"清空
+var noExpiry = new ClipboardStore(100, TimeSpan.Zero);
+for (var i = 0; i < 5; i++)
+{
+    noExpiry.Add("keep-" + i, "probe");
+}
+
+Console.WriteLine("zero retention: count=" + noExpiry.Count);
+Console.WriteLine(noExpiry.Count == 5 ? "ZERO RETENTION UNLIMITED = PASS" : "ZERO RETENTION UNLIMITED = FAIL");
+
 Console.WriteLine(textOk == 2 && imageOk == 2 ? "RESULT = PASS" : "RESULT = FAIL (textOk=" + textOk + " imageOk=" + imageOk + ")");
 
 // ---- phase 3.5: from: 来源筛选 ----

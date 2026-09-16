@@ -57,7 +57,15 @@ internal static class ClipboardPanel
     private static bool _suppressComboEvents;
     private static Button? _closeButton;
 
-    private static DateTime? _timeFilterDate;
+    private static DateTime? _timeFilterFrom;
+    private static DateTime? _timeFilterTo;
+    private static string? _timeFilterLabel;
+    private static readonly List<TimelineRow> _timelineRows = [];
+    private static int _timelineHighlight = -1;
+
+    /// <summary>时间线里的一行：既用于渲染，也用于键盘导航（↑↓ + Enter）。</summary>
+    private sealed record TimelineRow(Border Row, DateTime? From, DateTime? To, string Label);
+
     private static Popup? _timelinePopup;
     private static ListBoxItem? _timelineHeader;
     private static Brush? _themeSurface;
@@ -311,8 +319,24 @@ internal static class ClipboardPanel
                     e.Handled = true;
                     break;
 
+                case Key.Enter when _timelinePopup is { IsOpen: true }:
+                    ActivateTimelineHighlight(store);
+                    e.Handled = true;
+                    break;
+
                 case Key.Enter:
                     CopySelected(store);
+                    e.Handled = true;
+                    break;
+
+                // 时间线打开时方向键用于在区间里选择
+                case Key.Down when _timelinePopup is { IsOpen: true }:
+                    MoveTimelineHighlight(1);
+                    e.Handled = true;
+                    break;
+
+                case Key.Up when _timelinePopup is { IsOpen: true }:
+                    MoveTimelineHighlight(-1);
                     e.Handled = true;
                     break;
 
@@ -545,11 +569,12 @@ internal static class ClipboardPanel
                 continue;
             }
 
-            // 时间筛选：只作用于普通条目 —— 收藏和固定组始终可见
-            if (_timeFilterDate is not null
+            // 时间筛选（区间）：只作用于普通条目 —— 收藏和固定组始终可见
+            if (_timeFilterFrom is not null
                 && !entry.IsFavorite
                 && !entry.IsPinned
-                && entry.CreatedAt.Date != _timeFilterDate.Value)
+                && (entry.CreatedAt < _timeFilterFrom.Value
+                    || entry.CreatedAt > (_timeFilterTo ?? DateTime.MaxValue)))
             {
                 continue;
             }
@@ -560,7 +585,7 @@ internal static class ClipboardPanel
         }
 
         signature.Append('|').Append(visible).Append('|').Append(store.PinnedCount);
-        signature.Append('|').Append(_timeFilterDate?.Ticks ?? 0);
+        signature.Append('|').Append(_timeFilterFrom?.Ticks ?? 0).Append('-').Append(_timeFilterTo?.Ticks ?? 0);
         var sign = signature.ToString();
 
         if (sign == _lastSignature && _list.Items.Count > 0)
@@ -658,7 +683,8 @@ internal static class ClipboardPanel
                 + "）";
         }
 
-        _hint.Text = "共 " + store.Count + " 条" + badges
+        _hint.Text = (_timeFilterLabel is null ? string.Empty : "已筛选 " + _timeFilterLabel + " · ")
+            + "共 " + store.Count + " 条" + badges
             + " · ↑↓ 选择 · Enter 粘贴 · Ctrl+F 收藏 · Ctrl+P 固定 · Ctrl+Del 删除";
     }
 
@@ -756,30 +782,80 @@ internal static class ClipboardPanel
         UpdateHint(store);
 
         var days = new Dictionary<DateTime, int>();
+        var oldest = DateTime.Today;
+        var maxCount = 1;
         foreach (var entry in store.Snapshot())
         {
             var date = entry.CreatedAt.Date;
             days[date] = days.TryGetValue(date, out var n) ? n + 1 : 1;
-        }
-
-        var root = new StackPanel { MinWidth = 190 };
-        root.Children.Add(MakeTimelineRow("全部时间", null, -1, store));
-
-        foreach (var day in days.Keys.OrderByDescending(d => d).Take(45))
-        {
-            root.Children.Add(MakeTimelineRow(DayLabel(day), day, days[day], store));
-        }
-
-        if (days.Count > 45)
-        {
-            root.Children.Add(new TextBlock
+            if (date < oldest)
             {
-                Text = "更早的日期不再单独列出",
-                FontSize = 11,
-                Opacity = 0.5,
-                Margin = new Thickness(10, 4, 10, 2)
-            });
+                oldest = date;
+            }
         }
+
+        foreach (var n in days.Values)
+        {
+            if (n > maxCount)
+            {
+                maxCount = n;
+            }
+        }
+
+        var today = DateTime.Today;
+        var monthStart = new DateTime(today.Year, today.Month, 1);
+        var prevMonthStart = monthStart.AddMonths(-1);
+
+        var root = new StackPanel { MinWidth = 240 };
+
+        // ---- 快选区：相对区间，覆盖绝大多数场景，一眼可选 ----
+        root.Children.Add(QuickRow("全部时间", null, null, store));
+        root.Children.Add(QuickRow("今天", today, today, store));
+        root.Children.Add(QuickRow("昨天", today.AddDays(-1), today.AddDays(-1), store));
+        root.Children.Add(QuickRow("最近 7 天", today.AddDays(-6), today, store));
+        root.Children.Add(QuickRow("最近 30 天", today.AddDays(-29), today, store));
+        root.Children.Add(QuickRow("本月", monthStart, today, store));
+        root.Children.Add(QuickRow("上月", prevMonthStart, monthStart.AddDays(-1), store));
+
+        root.Children.Add(new Border
+        {
+            Height = 1,
+            Margin = new Thickness(8, 6, 8, 6),
+            Background = _themeBorderBrush ?? SystemColors.ControlLightBrush
+        });
+
+        // ---- 按天列表，按月分组；条数用条形长度表达，一眼看出哪天剪得多 ----
+        string? currentMonth = null;
+        foreach (var day in days.Keys.OrderByDescending(d => d))
+        {
+            var monthLabel = day.Year == today.Year ? day.Month + " 月" : day.Year + " 年 " + day.Month + " 月";
+            if (monthLabel != currentMonth)
+            {
+                currentMonth = monthLabel;
+                root.Children.Add(new TextBlock
+                {
+                    Text = monthLabel,
+                    FontSize = 11,
+                    FontWeight = FontWeights.SemiBold,
+                    Opacity = 0.55,
+                    Margin = new Thickness(10, 8, 10, 2),
+                    Foreground = _themeText ?? SystemColors.ControlTextBrush
+                });
+            }
+
+            root.Children.Add(DayRow(day, days[day], maxCount, store));
+        }
+
+        // ---- 底部：说明时间跨度的由来（保留策略决定，不是界面限制）----
+        root.Children.Add(new TextBlock
+        {
+            Text = "历史最早到 " + oldest.ToString("yyyy-MM-dd")
+                + "（保留 " + RetentionLabel() + "，可在设置中调整）",
+            FontSize = 11,
+            Opacity = 0.5,
+            Margin = new Thickness(10, 8, 10, 2),
+            TextWrapping = TextWrapping.Wrap
+        });
 
         var viewer = new ScrollViewer
         {
@@ -814,42 +890,163 @@ internal static class ClipboardPanel
         ClipboardListener.Log("timeline opened: " + days.Count + " day(s)", LogLevel.Debug);
     }
 
-    private static UIElement MakeTimelineRow(string label, DateTime? day, int count, ClipboardStore store)
+    /// <summary>快选行：相对区间（今天/最近 7 天/本月…），点击即筛选，再点一次取消。</summary>
+    private static UIElement QuickRow(string label, DateTime? from, DateTime? to, ClipboardStore store)
     {
-        var selected = _timeFilterDate == day;
+        var selected = IsCurrentFilter(from, to);
         var border = new Border
         {
             CornerRadius = new CornerRadius(6),
-            Padding = new Thickness(10, 7, 10, 7),
+            Padding = new Thickness(10, 6, 10, 6),
             Margin = new Thickness(2, 1, 2, 1),
             Background = selected ? _themeSelected ?? Brushes.Transparent : Brushes.Transparent,
-            Cursor = Cursors.Hand
+            Cursor = Cursors.Hand,
+            Child = new TextBlock
+            {
+                Text = label,
+                FontSize = 12.5,
+                FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal,
+                Foreground = _themeText ?? SystemColors.ControlTextBrush
+            }
         };
 
-        var text = new TextBlock
+        AttachTimelineRow(border, from, to, label, store);
+        return border;
+    }
+
+    /// <summary>某一天的筛选行：日期 + 条形（条数相对长度）+ 条数。</summary>
+    private static UIElement DayRow(DateTime day, int count, int maxCount, ClipboardStore store)
+    {
+        var from = day;
+        var to = day.AddDays(1).AddTicks(-1);
+        var selected = IsCurrentFilter(from, to);
+        var textBrush = _themeText ?? SystemColors.ControlTextBrush;
+
+        var panel = new StackPanel { Orientation = Orientation.Horizontal };
+
+        panel.Children.Add(new TextBlock
         {
+            Text = DayLabel(day),
             FontSize = 12.5,
-            Foreground = _themeText ?? SystemColors.ControlTextBrush,
-            Text = count >= 0 ? label + "  ·  " + count : label
+            Width = 82,
+            Foreground = textBrush,
+            FontWeight = selected ? FontWeights.SemiBold : FontWeights.Normal
+        });
+
+        panel.Children.Add(new Border
+        {
+            Height = 6,
+            Width = Math.Max(3, Math.Round(70.0 * count / maxCount)),
+            CornerRadius = new CornerRadius(3),
+            Background = _themeSelected ?? Brushes.Gray,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 8, 0)
+        });
+
+        panel.Children.Add(new TextBlock
+        {
+            Text = count.ToString(),
+            FontSize = 11.5,
+            Width = 34,
+            TextAlignment = TextAlignment.Right,
+            Opacity = 0.6,
+            Foreground = textBrush
+        });
+
+        var border = new Border
+        {
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(10, 5, 10, 5),
+            Margin = new Thickness(2, 1, 2, 1),
+            Background = selected ? _themeSelected ?? Brushes.Transparent : Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            Child = panel
         };
 
-        if (selected)
-        {
-            text.FontWeight = FontWeights.SemiBold;
-        }
+        AttachTimelineRow(border, from, to, DayLabel(day), store);
+        return border;
+    }
 
-        border.Child = text;
+    /// <summary>统一挂交互并登记到键盘导航表（↑↓ + Enter 用）。</summary>
+    private static void AttachTimelineRow(Border border, DateTime? from, DateTime? to, string label, ClipboardStore store)
+    {
+        var selected = IsCurrentFilter(from, to);
+        _timelineRows.Add(new TimelineRow(border, from, to, label));
+
         border.MouseEnter += (_, _) => { if (!selected) border.Background = _themeHover ?? Brushes.Transparent; };
         border.MouseLeave += (_, _) => { if (!selected) border.Background = Brushes.Transparent; };
         border.MouseLeftButtonUp += (_, e) =>
         {
             e.Handled = true;
-            _timeFilterDate = day;
-            CloseTimeline();
-            Refresh(store);
+            ApplyTimeFilter(from, to, label, store);
         };
+    }
 
-        return border;
+    /// <summary>应用时间筛选；再次点击当前区间即取消（"全部时间"直接清除）。</summary>
+    private static void ApplyTimeFilter(DateTime? from, DateTime? to, string label, ClipboardStore store)
+    {
+        if (from is not null && IsCurrentFilter(from, to))
+        {
+            _timeFilterFrom = null;
+            _timeFilterTo = null;
+            _timeFilterLabel = null;
+        }
+        else
+        {
+            _timeFilterFrom = from;
+            _timeFilterTo = to;
+            _timeFilterLabel = from is null ? null : label;
+        }
+
+        CloseTimeline();
+        Refresh(store);
+    }
+
+    private static bool IsCurrentFilter(DateTime? from, DateTime? to)
+        => _timeFilterFrom == from && _timeFilterTo == to;
+
+    private static void MoveTimelineHighlight(int delta)
+    {
+        if (_timelineRows.Count == 0)
+        {
+            return;
+        }
+
+        var next = Math.Clamp(_timelineHighlight + delta, 0, _timelineRows.Count - 1);
+        if (next == _timelineHighlight)
+        {
+            return;
+        }
+
+        if (_timelineHighlight >= 0 && _timelineHighlight < _timelineRows.Count)
+        {
+            var previous = _timelineRows[_timelineHighlight];
+            if (!IsCurrentFilter(previous.From, previous.To))
+            {
+                previous.Row.Background = Brushes.Transparent;
+            }
+        }
+
+        _timelineHighlight = next;
+        _timelineRows[next].Row.Background = _themeHover ?? Brushes.Transparent;
+        _timelineRows[next].Row.BringIntoView();
+    }
+
+    private static void ActivateTimelineHighlight(ClipboardStore store)
+    {
+        if (_timelineHighlight < 0 || _timelineHighlight >= _timelineRows.Count)
+        {
+            return;
+        }
+
+        var row = _timelineRows[_timelineHighlight];
+        ApplyTimeFilter(row.From, row.To, row.Label, store);
+    }
+
+    private static string RetentionLabel()
+    {
+        var days = ClipboardSettings.Current.RetentionDays;
+        return days <= 0 ? "不限时" : days + " 天";
     }
 
     private static string DayLabel(DateTime date)
@@ -879,6 +1076,8 @@ internal static class ClipboardPanel
 
         _timelinePopup = null;
         _timelineHeader = null;
+        _timelineRows.Clear();
+        _timelineHighlight = -1;
     }
 
     private static (ListBoxItem Item, Border Accent, Image? Thumbnail) MakeRow(ClipboardIndexEntry entry, ClipboardStore store)

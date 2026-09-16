@@ -1,5 +1,10 @@
 # Lertaro 剪贴板历史插件
 
+> 本仓库包含 **两个** Lertaro 原生插件：
+> ① 剪贴板历史（本文档，`src\Lertaro.Plugins.ClipboardHistory`，`release\ClipboardHistory-*.zip`）
+> ② **屏幕准星**（`src\Lertaro.Plugins.Crosshair`，`release\Crosshair-*.zip`，说明见 [`packaging/crosshair/README.md`](packaging/crosshair/README.md)）
+> 两者互不依赖，可单独安装。
+
 Lertaro 原生剪贴板历史插件：全局热键唤起独立面板，支持文本 / 图片 / 文件三类记录、按天时间线筛选、来源应用筛选、悬停预览全文、历史持久化。
 
 > 验证环境：Lertaro **5.6.7**（PluginSdk 1.8.6）/ Windows 11 / .NET 10（宿主自带运行时，用户无需安装 .NET）

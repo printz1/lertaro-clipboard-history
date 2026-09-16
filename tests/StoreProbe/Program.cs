@@ -22,6 +22,28 @@ Console.WriteLine("add files  -> " + store.AddFiles(fileList, ClipboardIndexEntr
 
 Console.WriteLine("count=" + store.Count + " dirty=" + store.Dirty);
 
+// 收藏：切换 + 淘汰豁免（收藏项在容量超限时也不能被淘汰）
+var favId = 0L;
+foreach (var e in store.Snapshot())
+{
+    if (e.Kind == ClipboardEntryKind.Text && e.Preview.Contains("beta", StringComparison.Ordinal))
+    {
+        favId = e.Id;
+        break;
+    }
+}
+
+Console.WriteLine("favorite target id=" + favId + " -> " + store.ToggleFavorite(favId));
+var favCount = 0;
+foreach (var e in store.Snapshot())
+{
+    if (e.IsFavorite)
+    {
+        favCount++;
+    }
+}
+Console.WriteLine("favorites=" + favCount);
+
 Console.WriteLine("== phase 2: persist ==");
 store.Persist(historyPath);
 var json = File.ReadAllText(historyPath);
@@ -39,7 +61,7 @@ foreach (var entry in store2.Snapshot())
     if (entry.Kind == ClipboardEntryKind.Text)
     {
         var text = store2.TryGetText(entry.Id);
-        Console.WriteLine("  text id=" + entry.Id + " preview=" + entry.Preview + " payload=" + (string.IsNullOrEmpty(text) ? "MISSING" : "ok"));
+        Console.WriteLine("  text id=" + entry.Id + " fav=" + entry.IsFavorite + " preview=" + entry.Preview + " payload=" + (string.IsNullOrEmpty(text) ? "MISSING" : "ok"));
         if (!string.IsNullOrEmpty(text))
         {
             textOk++;
@@ -48,7 +70,7 @@ foreach (var entry in store2.Snapshot())
     else if (entry.Kind == ClipboardEntryKind.File)
     {
         var payload = store2.TryGetText(entry.Id);
-        Console.WriteLine("  file id=" + entry.Id + " preview=" + entry.Preview + " payload=" + (string.IsNullOrEmpty(payload) ? "MISSING" : "ok"));
+        Console.WriteLine("  file id=" + entry.Id + " fav=" + entry.IsFavorite + " preview=" + entry.Preview + " payload=" + (string.IsNullOrEmpty(payload) ? "MISSING" : "ok"));
         if (!string.IsNullOrEmpty(payload))
         {
             imageOk++; // 复用计数：文件+图片都需各就各位
@@ -57,13 +79,49 @@ foreach (var entry in store2.Snapshot())
     else
     {
         var img = store2.TryGetImagePath(entry.Id);
-        Console.WriteLine("  image id=" + entry.Id + " path=" + (string.IsNullOrEmpty(img) ? "MISSING" : "ok"));
+        Console.WriteLine("  image id=" + entry.Id + " fav=" + entry.IsFavorite + " path=" + (string.IsNullOrEmpty(img) ? "MISSING" : "ok"));
         if (!string.IsNullOrEmpty(img))
         {
             imageOk++;
         }
     }
 }
+
+var restoredFav = 0;
+var restoredFavIsBeta = false;
+foreach (var e in store2.Snapshot())
+{
+    if (e.IsFavorite)
+    {
+        restoredFav++;
+        restoredFavIsBeta = e.Preview.Contains("beta", StringComparison.Ordinal);
+    }
+}
+
+Console.WriteLine("restored favorites=" + restoredFav + " isBeta=" + restoredFavIsBeta);
+Console.WriteLine(restoredFav == 1 && restoredFavIsBeta ? "FAVORITE PERSIST = PASS" : "FAVORITE PERSIST = FAIL");
+
+// 淘汰豁免：容量 3 的 store，收藏最旧的一条后继续塞 10 条，收藏项必须仍在
+var tiny = new ClipboardStore(3, TimeSpan.FromDays(30));
+tiny.Add("keep-me-favorite", "probe");
+var tinyFavId = tiny.Snapshot()[0].Id;
+tiny.ToggleFavorite(tinyFavId);
+for (var i = 0; i < 10; i++)
+{
+    tiny.Add("filler-" + i, "probe");
+}
+
+var favoriteKept = false;
+foreach (var e in tiny.Snapshot())
+{
+    if (e.Id == tinyFavId && e.IsFavorite)
+    {
+        favoriteKept = true;
+    }
+}
+
+Console.WriteLine("trim exemption: count=" + tiny.Count + " favoriteKept=" + favoriteKept);
+Console.WriteLine(tiny.Count == 3 && favoriteKept ? "FAVORITE TRIM EXEMPTION = PASS" : "FAVORITE TRIM EXEMPTION = FAIL");
 
 Console.WriteLine(textOk == 2 && imageOk == 2 ? "RESULT = PASS" : "RESULT = FAIL (textOk=" + textOk + " imageOk=" + imageOk + ")");
 

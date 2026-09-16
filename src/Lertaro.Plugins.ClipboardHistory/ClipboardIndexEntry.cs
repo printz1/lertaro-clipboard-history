@@ -112,6 +112,12 @@ internal sealed class ClipboardIndexEntry
 
     internal bool IsPinned { get; set; }
 
+    /// <summary>
+    /// 收藏：与置顶语义不同 —— 收藏条目永不淘汰（不过期、不受容量/预算限制）、
+    /// 持久化永久保留，除非用户显式取消或删除；置顶只影响排序。
+    /// </summary>
+    internal bool IsFavorite { get; set; }
+
     // ---- 图片专属（文本条目为默认值） ----
 
     internal string ImagePath { get; } = string.Empty;
@@ -137,7 +143,11 @@ internal sealed class ClipboardIndexEntry
                 text += "  ·  " + SourceProcess;
             }
 
-            if (IsPinned)
+            if (IsFavorite)
+            {
+                text = "已收藏  ·  " + text;
+            }
+            else if (IsPinned)
             {
                 text = "已固定  ·  " + text;
             }

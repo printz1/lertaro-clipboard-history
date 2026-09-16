@@ -270,7 +270,7 @@ internal static class ClipboardPanel
             TextAlignment = TextAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Opacity = 0.65,
-            Text = "↑↓ 选择 · Enter 粘贴 · 悬停看全文 · from:来源 筛选 · Ctrl+P 固定 · Ctrl+Del 删除"
+            Text = "↑↓ 选择 · Enter 粘贴 · 悬停看全文 · from:来源 筛选 · Ctrl+F 收藏 · Ctrl+P 固定 · Ctrl+Del 删除"
         };
 
         // ---- 中部：列表（行高固定两行；全文走悬停浮窗，业内通行的 Ditto/CopyQ 模式）----
@@ -329,6 +329,11 @@ internal static class ClipboardPanel
 
                 case Key.P when (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control:
                     TogglePin(store);
+                    e.Handled = true;
+                    break;
+
+                case Key.F when (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control:
+                    ToggleFavorite(store);
                     e.Handled = true;
                     break;
 
@@ -527,6 +532,7 @@ internal static class ClipboardPanel
 
         // 一次遍历同时完成：类型过滤、固定/普通拆组、渲染签名。
         // 签名与上次一致就不动视觉树（输错又删掉、Ctrl+P 后同序等场景），整棵子树重建就此免掉。
+        var favorites = new List<ClipboardIndexEntry>();
         var pinned = new List<ClipboardIndexEntry>();
         var normal = new List<ClipboardIndexEntry>();
         var signature = new StringBuilder(512);
@@ -539,15 +545,18 @@ internal static class ClipboardPanel
                 continue;
             }
 
-            // 时间筛选：点了时间线里的某一天之后，只保留那一天的条目（已固定组不受影响）
-            if (_timeFilterDate is not null && entry.CreatedAt.Date != _timeFilterDate.Value)
+            // 时间筛选：只作用于普通条目 —— 收藏和固定组始终可见
+            if (_timeFilterDate is not null
+                && !entry.IsFavorite
+                && !entry.IsPinned
+                && entry.CreatedAt.Date != _timeFilterDate.Value)
             {
                 continue;
             }
 
             visible++;
             signature.Append(entry.Id).Append(',');
-            (entry.IsPinned ? pinned : normal).Add(entry);
+            (entry.IsFavorite ? favorites : entry.IsPinned ? pinned : normal).Add(entry);
         }
 
         signature.Append('|').Append(visible).Append('|').Append(store.PinnedCount);
@@ -568,6 +577,16 @@ internal static class ClipboardPanel
             _list.Items.Clear();
             Rows.Clear();
             _highlighted = null;
+
+            // 收藏组永远在最上（永久保留的条目），其次是固定组，然后是时间分组
+            if (favorites.Count > 0)
+            {
+                _list.Items.Add(MakeGroupHeader("收藏", favorites.Count, store, clickable: false));
+                foreach (var entry in favorites)
+                {
+                    AddRow(entry, store);
+                }
+            }
 
             // 固定的条目单列一组放最上面 —— 和主流工具的"收藏条"一致，常用内容不用滚
             if (pinned.Count > 0)
@@ -620,9 +639,27 @@ internal static class ClipboardPanel
             return;
         }
 
-        _hint.Text = "共 " + store.Count + " 条"
-            + (store.PinnedCount > 0 ? "（固定 " + store.PinnedCount + "）" : string.Empty)
-            + " · ↑↓ 选择 · Enter 粘贴 · Ctrl+P 固定 · Ctrl+Del 删除";
+        var favorites = 0;
+        foreach (var entry in store.Snapshot())
+        {
+            if (entry.IsFavorite)
+            {
+                favorites++;
+            }
+        }
+
+        var badges = string.Empty;
+        if (favorites > 0 || store.PinnedCount > 0)
+        {
+            badges = "（"
+                + (favorites > 0 ? "收藏 " + favorites : string.Empty)
+                + (favorites > 0 && store.PinnedCount > 0 ? " · " : string.Empty)
+                + (store.PinnedCount > 0 ? "固定 " + store.PinnedCount : string.Empty)
+                + "）";
+        }
+
+        _hint.Text = "共 " + store.Count + " 条" + badges
+            + " · ↑↓ 选择 · Enter 粘贴 · Ctrl+F 收藏 · Ctrl+P 固定 · Ctrl+Del 删除";
     }
 
     private static void AddRow(ClipboardIndexEntry entry, ClipboardStore store)
@@ -856,7 +893,7 @@ internal static class ClipboardPanel
 
         var preview = new TextBlock
         {
-            Text = entry.Preview,
+            Text = (entry.IsFavorite ? "★ " : "") + entry.Preview,
             FontSize = 13,
             TextTrimming = TextTrimming.CharacterEllipsis,
             TextWrapping = TextWrapping.NoWrap
@@ -1726,6 +1763,19 @@ internal static class ClipboardPanel
 
         var pinned = store.TogglePin(entry.Id);
         ClipboardListener.Log("entry " + entry.Id + " pinned=" + pinned, LogLevel.Debug);
+        Refresh(store);
+    }
+
+    /// <summary>Ctrl+F：切换收藏。收藏条目永不淘汰、随快照永久保留。</summary>
+    private static void ToggleFavorite(ClipboardStore store)
+    {
+        if (_list?.SelectedItem is not ListBoxItem { Tag: ClipboardIndexEntry entry })
+        {
+            return;
+        }
+
+        var favorite = store.ToggleFavorite(entry.Id);
+        ClipboardListener.Log("entry " + entry.Id + " favorite=" + favorite, LogLevel.Debug);
         Refresh(store);
     }
 

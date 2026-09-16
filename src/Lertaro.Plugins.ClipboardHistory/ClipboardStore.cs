@@ -514,6 +514,27 @@ internal sealed class ClipboardStore
     }
 
     /// <summary>
+    /// 切换收藏。收藏条目永不淘汰（Trim 跳过）、随快照永久持久化，
+    /// 面板里单独成组置顶展示；与置顶（仅排序）语义分离。
+    /// </summary>
+    internal bool ToggleFavorite(long id)
+    {
+        lock (_gate)
+        {
+            var entry = _index.Find(e => e.Id == id);
+            if (entry is null)
+            {
+                return false;
+            }
+
+            entry.IsFavorite = !entry.IsFavorite;
+            _version++;
+            _dirty = true;
+            return entry.IsFavorite;
+        }
+    }
+
+    /// <summary>
     /// 当前固定条数，用于底部状态显示与刷新签名。
     /// 计数器增量维护：面板每次刷新都会读它，之前用 <c>_index.Count(e =&gt; e.IsPinned)</c>
     /// 等于每次击键都在锁内全表扫一遍。
@@ -541,17 +562,32 @@ internal sealed class ClipboardStore
             var overCapacity = _index.Count > _capacity;
             var overBudget = _payloadChars > _payloadCharBudget;
 
-            var oldest = _index[^1];
-            var expired = expiryEnabled && !oldest.IsPinned && oldest.CreatedAt < cutoff;
+            // 收藏条目永不淘汰：从尾部往前找第一个可淘汰项。
+            // 置顶只影响排序，不再豁免过期/容量 —— 那是收藏的语义。
+            var victimIndex = -1;
+            for (var i = _index.Count - 1; i >= 0; i--)
+            {
+                if (!_index[i].IsFavorite)
+                {
+                    victimIndex = i;
+                    break;
+                }
+            }
+
+            if (victimIndex < 0)
+            {
+                break; // 全是收藏，无可淘汰
+            }
+
+            var victim = _index[victimIndex];
+            var expired = expiryEnabled && victim.CreatedAt < cutoff;
 
             if (!overCapacity && !overBudget && !expired)
             {
                 break;
             }
 
-            // 预算与时效可以淘汰固定条目之外的最旧项；条数超限时连固定条目也保不住，
-            // 但仍优先从尾部（最旧）开始，固定条目通常因此最后被淘汰。
-            RemoveAt(_index.Count - 1);
+            RemoveAt(victimIndex);
         }
     }
 
@@ -636,6 +672,7 @@ internal sealed class ClipboardStore
         public string? S { get; set; }      // 来源进程
         public long C { get; set; }         // CreatedAt.Ticks
         public bool X { get; set; }         // 已固定
+        public bool F { get; set; }         // 已收藏（永久保留）
     }
 
     private sealed class PersistedState
@@ -676,7 +713,8 @@ internal sealed class ClipboardStore
                         T = text,
                         S = entry.SourceProcess,
                         C = entry.CreatedAt.Ticks,
-                        X = entry.IsPinned
+                        X = entry.IsPinned,
+                        F = entry.IsFavorite
                     });
                 }
                 else if (entry.Kind == ClipboardEntryKind.File)
@@ -696,7 +734,8 @@ internal sealed class ClipboardStore
                         L = entry.Length,
                         S = entry.SourceProcess,
                         C = entry.CreatedAt.Ticks,
-                        X = entry.IsPinned
+                        X = entry.IsPinned,
+                        F = entry.IsFavorite
                     });
                 }
                 else
@@ -717,7 +756,8 @@ internal sealed class ClipboardStore
                         L = entry.Length,
                         S = entry.SourceProcess,
                         C = entry.CreatedAt.Ticks,
-                        X = entry.IsPinned
+                        X = entry.IsPinned,
+                        F = entry.IsFavorite
                     });
                 }
             }
@@ -842,6 +882,7 @@ internal sealed class ClipboardStore
                 }
 
                 entry.IsPinned = item.X;
+                entry.IsFavorite = item.F;
                 if (entry.IsPinned)
                 {
                     store._pinnedCount++;

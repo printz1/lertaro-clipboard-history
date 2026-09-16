@@ -94,13 +94,35 @@ public sealed class ClipboardHistoryPlugin : IPlugin, IInstantResultProvider, IA
             TimeSpan.FromSeconds(2));
     }
 
-    public string Name => "剪贴板历史";
+    public string Name => Localized("ClipboardHistoryPlugin_Name", "剪贴板历史");
 
-    public string Description => "记录复制过的文本、图片与文件，输入 cb 或 clip 调用；文本持久化为 JSON，图片以 PNG 存于数据目录。";
+    public string Description => Localized(
+        "ClipboardHistoryPlugin_Description",
+        "记录复制过的文本、图片与文件，输入 cb 或 clip 调用；文本持久化为 JSON，图片以 PNG 存于数据目录。");
 
     public string WebsiteUrl => string.Empty;
 
     public string WebsiteLabel => string.Empty;
+
+    /// <summary>
+    /// 插件显示名/描述的本地化（对照开发指南：ITranslationProvider 也负责插件自身文案）。
+    /// 键缺失或翻译尚未加载时回退到中文原文，避免界面显示成裸键名。
+    /// </summary>
+    private static string Localized(string key, string fallback)
+    {
+        try
+        {
+            var value = TranslationService.Get(key);
+            return string.IsNullOrWhiteSpace(value)
+                || string.Equals(value, key, StringComparison.Ordinal)
+                ? fallback
+                : value;
+        }
+        catch
+        {
+            return fallback;
+        }
+    }
 
     public ClipboardHistoryPlugin()
     {

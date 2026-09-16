@@ -1,4 +1,6 @@
 {
+  "ClipboardHistoryPlugin_Name": "剪贴板历史",
+  "ClipboardHistoryPlugin_Description": "记录复制过的文本、图片与文件，输入 cb 或 clip 调用；文本持久化为 JSON，图片以 PNG 存于数据目录。",
   "ClipboardHistory_Config_Group_General": "常规",
   "ClipboardHistory_Config_Hotkey_Label": "打开剪贴板历史的全局热键",
   "ClipboardHistory_Config_Hotkey_Desc": "直接填写组合键文本，例如 Win+V、Ctrl+Shift+V、Ctrl+`。由插件自己注册，所以宿主不认的 Win 组合也能用。注意：若已开启 Windows 自带的剪贴板历史，Win+V 会被系统占用。改完点应用立即生效，无需重启。",

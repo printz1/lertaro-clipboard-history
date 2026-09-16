@@ -1,4 +1,6 @@
 {
+  "ClipboardHistoryPlugin_Name": "Clipboard History",
+  "ClipboardHistoryPlugin_Description": "Keeps the text, images and files you copy. Type cb or clip to search them; text is persisted as JSON and images as PNG in the plugin data folder.",
   "ClipboardHistory_Config_Group_General": "General",
   "ClipboardHistory_Config_Hotkey_Label": "Global hotkey to open clipboard history",
   "ClipboardHistory_Config_Hotkey_Desc": "Type the combination as text, e.g. Win+V, Ctrl+Shift+V, Ctrl+`. The plugin registers it itself, so Win combinations the host rejects still work. Note: if Windows clipboard history is enabled, Win+V is taken by the system. Applying takes effect immediately, no restart needed.",

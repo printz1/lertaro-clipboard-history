@@ -10,6 +10,12 @@ namespace Lertaro.Plugins.Crosshair;
 /// 屏幕准星插件：在屏幕中央叠加自定义准星（颜色/描边/中心点/内部线条/外部线条），
 /// 全屏、置顶、点击穿透。参数体系 1:1 对齐 okiaimx.com 的准星编辑器（即 VALORANT 的准星参数），
 /// 支持 VALORANT 准星代码的导入与导出，全部可在设置面板实时修改。
+///
+/// 对照开发指南的三条约定：
+/// ① 构造函数只做「非阻塞」的事：读一次设置（预热）+ 调度 UI，绝不等待；
+/// ② 全局热键与全屏叠加窗属于"高成本运行时"，先查组件级开关
+///    （<see cref="PluginSettingsService.IsComponentEnabled"/>）并在用户切换后启停；
+/// ③ 热路径（打字触发的即时结果、渲染动作菜单读 Keywords）不读盘、不反复分配。
 /// </summary>
 public sealed class CrosshairPlugin : IPlugin, IInstantResultProvider, IActionProvider, IConfigurable, ITranslationProvider
 {
@@ -20,9 +26,11 @@ public sealed class CrosshairPlugin : IPlugin, IInstantResultProvider, IActionPr
     private static readonly CrosshairShowAction ShowAction = new();
     private static readonly CrosshairHideAction HideAction = new();
 
-    public string Name => "屏幕准星";
+    public string Name => CrosshairText.Get("CrosshairPlugin_Name", "屏幕准星");
 
-    public string Description => "屏幕中央显示自定义准星（颜色/描边/中心点/内外线，参数与 okiaimx、VALORANT 一致，支持 VALORANT 代码导入导出），点击穿透不影响游戏；输入 准星 或 cross 查看。";
+    public string Description => CrosshairText.Get(
+        "CrosshairPlugin_Description",
+        "屏幕中央显示自定义准星（颜色/描边/中心点/内外线，参数与 okiaimx、VALORANT 一致，支持 VALORANT 代码导入导出），点击穿透不影响游戏；输入 准星 或 cross 查看。");
 
     public string WebsiteUrl => string.Empty;
 
@@ -30,9 +38,74 @@ public sealed class CrosshairPlugin : IPlugin, IInstantResultProvider, IActionPr
 
     public CrosshairPlugin()
     {
+        // 预热：把设置读进内存（含一次 JSON 反序列化）。放在这里可以避免"用户敲下第一个字时才读盘"，
+        // 因为 GetInstantResults / Keywords 都在同步热路径上被调用。
+        _ = CrosshairSettings.Current;
+
+        // 用户在「设置 → 插件」里切换本组件开关时，宿主会广播，我们据此启停热键与叠加窗。
+        try
+        {
+            PluginSettingsService.ComponentEnablementChanged += ApplyRuntime;
+        }
+        catch
+        {
+            // 宿主未挂载该服务：按启用处理
+        }
+
         // 构造必须极快：只调度 UI 初始化，不做任何等待
+        ApplyRuntime();
+    }
+
+    /// <summary>
+    /// 组件级开关（宿主在「设置 → 插件」里单独禁用某个组件时返回 false）。
+    /// 与剪贴板插件同一套判据；宿主未注册回调时按启用处理。
+    /// </summary>
+    private static bool IsComponentEnabled()
+    {
+        try
+        {
+            return PluginSettingsService.IsComponentEnabled(
+                "Lertaro.Plugins.Crosshair.dll",
+                nameof(IInstantResultProvider),
+                nameof(CrosshairPlugin));
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    /// <summary>按组件开关启动或停止「热键 + 叠加窗」这套高成本运行时。</summary>
+    private static void ApplyRuntime()
+    {
+        if (!IsComponentEnabled())
+        {
+            CrosshairText.Log("component disabled in host settings, overlay and hotkey stopped", LogLevel.Info);
+            StopRuntime();
+            return;
+        }
+
         ApplyVisibilityAsync();
         ApplyHotkeyAsync();
+    }
+
+    private static void StopRuntime()
+    {
+        var app = System.Windows.Application.Current;
+        if (app is null)
+        {
+            CrosshairHotkey.Apply(string.Empty);
+            return;
+        }
+
+        if (!app.Dispatcher.CheckAccess())
+        {
+            app.Dispatcher.BeginInvoke(new Action(StopRuntime));
+            return;
+        }
+
+        CrosshairOverlay.HideOverlay();
+        CrosshairHotkey.Apply(string.Empty); // 空字符串 = 注销热键
     }
 
     private static void ApplyHotkeyAsync()
@@ -52,12 +125,11 @@ public sealed class CrosshairPlugin : IPlugin, IInstantResultProvider, IActionPr
         CrosshairHotkey.Apply(CrosshairSettings.Current.Hotkey);
     }
 
-    /// <summary>编辑器保存后调用：显示状态、外观、热键全部实时生效。</summary>
+    /// <summary>编辑器/设置面板保存后调用：显示状态、外观、热键全部实时生效。</summary>
     internal static void ApplySettingsLive()
     {
-        ApplyVisibilityAsync();
+        ApplyRuntime();
         CrosshairOverlay.Refresh();
-        ApplyHotkeyAsync();
     }
 
     private static void ApplyVisibilityAsync()
@@ -112,10 +184,11 @@ public sealed class CrosshairPlugin : IPlugin, IInstantResultProvider, IActionPr
         {
             settings.Primary.Inner.Enabled = true;
             settings.Save();
+            CrosshairText.Log("crosshair was blank (inner/outer/dot all off), inner lines restored", LogLevel.Info);
         }
 
-        ApplyVisibilityAsync();
-        System.Diagnostics.Debug.WriteLine($"crosshair {visible} via {source}");
+        ApplyRuntime();
+        CrosshairText.Log($"crosshair {(visible ? "shown" : "hidden")} via {source}", LogLevel.Info);
     }
 
     /// <summary>内线/外线/中心点全部禁用 = 打开了也什么都看不见。</summary>

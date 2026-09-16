@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using Lertaro.PluginSdk.Windows;
 
 namespace Lertaro.Plugins.Crosshair;
 
@@ -10,9 +11,14 @@ namespace Lertaro.Plugins.Crosshair;
 /// 底部「代码（VALORANT 兼容）」可粘贴代码应用、也可复制出去。
 /// 宿主的通用设置面板放不了自定义控件，所以体验在这里做；
 /// 通用面板只保留等价的文本字段作为后备。
+///
+/// 窗口壳用 SDK 的 <see cref="PluginWindow"/>（对照开发指南）：主题、DPI、任务栏与
+/// Alt+Tab 都由宿主统一处理，插件不再自己造裸窗口。
 /// </summary>
-internal sealed class CrosshairEditor : Window
+internal sealed class CrosshairEditor
 {
+    private PluginWindow? _window;
+
     private const double PreviewSize = 180;
 
     private readonly CrosshairSettings _draft;
@@ -38,24 +44,33 @@ internal sealed class CrosshairEditor : Window
     internal CrosshairEditor()
     {
         _draft = CrosshairSettings.Current.Clone();
+        SyncControls();
+        RenderPreview();
+    }
 
-        Title = "准星编辑器（okiaimx / VALORANT 参数）";
-        Width = 820;
-        Height = 880;
-        MinWidth = 700;
-        MinHeight = 560;
-        WindowStartupLocation = WindowStartupLocation.CenterScreen;
-        Background = SystemColors.ControlBrush;
-
-        Content = new ScrollViewer
+    /// <summary>
+    /// 用宿主主题化的 <see cref="PluginWindow"/> 打开编辑器（Dialog 模式：置顶且不进 Alt+Tab）。
+    /// 复用一个实例即可，关闭后引用置空。
+    /// </summary>
+    internal void Show()
+    {
+        var body = new ScrollViewer
         {
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             Content = BuildBody()
         };
 
-        SyncControls();
-        RenderPreview();
+        _window = new PluginWindow("准星编辑器（okiaimx / VALORANT 参数）", 840, 880, PluginWindowMode.Dialog)
+        {
+            WindowStartupLocation = WindowStartupLocation.CenterScreen,
+            MinWidth = 700,
+            MinHeight = 560
+        };
+
+        _window.ContentHostControl.Content = body;
+        _window.ShowDialog();
+        _window = null;
     }
 
     private UIElement BuildBody()
@@ -430,7 +445,7 @@ internal sealed class CrosshairEditor : Window
         };
 
         var cancel = new Button { Content = "取消", Padding = new Thickness(18, 6, 18, 6), Margin = new Thickness(0, 0, 8, 0) };
-        cancel.Click += (_, _) => Close();
+        cancel.Click += (_, _) => _window?.Close();
         row.Children.Add(cancel);
 
         var save = new Button { Content = "保存并应用", Padding = new Thickness(18, 6, 18, 6), FontSize = 13 };
@@ -446,7 +461,7 @@ internal sealed class CrosshairEditor : Window
             current.ApplyFrom(_draft); // Clamp + Save + 清洗参数
 
             CrosshairPlugin.ApplySettingsLive();
-            Close();
+            _window?.Close();
         };
         row.Children.Add(save);
 

@@ -14,6 +14,27 @@ internal static class CrosshairConfigSchema
 {
     private const string GroupKey = "Crosshair";
 
+    /// <summary>
+    /// 颜色下拉项（对照开发指南：Value 写入设置、LabelKey 解析为界面文本）。
+    /// 索引 0-7 为 VALORANT 预设色，8 = 自定义十六进制。
+    /// </summary>
+    private static readonly List<PluginConfigChoice> ColorChoices =
+    [
+        new() { Value = "0", LabelKey = "Crosshair_Color_White" },
+        new() { Value = "1", LabelKey = "Crosshair_Color_Green" },
+        new() { Value = "2", LabelKey = "Crosshair_Color_YellowGreen" },
+        new() { Value = "3", LabelKey = "Crosshair_Color_GreenYellow" },
+        new() { Value = "4", LabelKey = "Crosshair_Color_Yellow" },
+        new() { Value = "5", LabelKey = "Crosshair_Color_Cyan" },
+        new() { Value = "6", LabelKey = "Crosshair_Color_Pink" },
+        new() { Value = "7", LabelKey = "Crosshair_Color_Red" },
+        new() { Value = CrosshairCodec.CustomColorIndex.ToString(CultureInfo.InvariantCulture), LabelKey = "Crosshair_Color_Custom" }
+    ];
+
+    /// <summary>颜色索引 → 下拉项的稳定字符串值。</summary>
+    private static string ColorValues(int index) =>
+        Math.Clamp(index, 0, CrosshairCodec.CustomColorIndex).ToString(CultureInfo.InvariantCulture);
+
     internal static PluginConfigSchema Build(
         CrosshairSettings current,
         CrosshairSettings staged,
@@ -36,10 +57,12 @@ internal static class CrosshairConfigSchema
                     value => ApplyCode(staged, value?.ToString())),
 
                 // ---- 颜色 ----
+                // 开发指南的 Choice + ChoiceOptions：保存的是稳定值 "0".."8"，界面显示的是本地化标签
                 NewField("Color", "Crosshair_Config_Color_Label", "Crosshair_Config_Color_Desc",
-                    ConfigFieldType.Integer, current.Primary.Color,
-                    () => staged.Primary.Color,
-                    value => staged.Primary.Color = ToInt(value, staged.Primary.Color)),
+                    ConfigFieldType.Choice, ColorValues(current.Primary.Color),
+                    () => ColorValues(staged.Primary.Color),
+                    value => staged.Primary.Color = ToInt(value, staged.Primary.Color),
+                    choices: ColorChoices),
 
                 NewField("HexColor", "Crosshair_Config_HexColor_Label", "Crosshair_Config_HexColor_Desc",
                     ConfigFieldType.Text, CrosshairCodec.Hex6(current.Primary.HexColor.Value),
@@ -183,10 +206,13 @@ internal static class CrosshairConfigSchema
                     () => staged.TriggerKeywords,
                     value => staged.TriggerKeywords = CrosshairSettings.NormalizeKeywords(value as IEnumerable<string>)),
 
+                // 开发指南的 Hotkey 字段类型 = 按键录制框；RequireModifier 强制带修饰键。
+                // 注意：宿主录制框不认 Win 组合（剪贴板插件同样因此改用文本字段），如需 Win 组合键请反馈。
                 NewField("Hotkey", "Crosshair_Config_Hotkey_Label", "Crosshair_Config_Hotkey_Desc",
-                    ConfigFieldType.Text, current.Hotkey,
+                    ConfigFieldType.Hotkey, current.Hotkey,
                     () => staged.Hotkey,
-                    value => staged.Hotkey = value?.ToString() ?? string.Empty)
+                    value => staged.Hotkey = value?.ToString() ?? string.Empty,
+                    requireModifier: true)
             ],
             OnSave = onSave,
             OnRollback = onRollback
@@ -213,7 +239,9 @@ internal static class CrosshairConfigSchema
         ConfigFieldType type,
         object defaultValue,
         Func<object?> getValue,
-        Action<object?> setValue)
+        Action<object?> setValue,
+        List<PluginConfigChoice>? choices = null,
+        bool requireModifier = false)
     {
         return new PluginConfigField
         {
@@ -223,6 +251,8 @@ internal static class CrosshairConfigSchema
             DescriptionKey = descriptionKey,
             FieldType = type,
             DefaultValue = defaultValue,
+            ChoiceOptions = choices,
+            RequireModifier = requireModifier,
             GetValue = getValue,
             SetValue = setValue
         };

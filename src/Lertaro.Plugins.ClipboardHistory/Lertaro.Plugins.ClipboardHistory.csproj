@@ -9,13 +9,18 @@
     <AssemblyName>Lertaro.Plugins.ClipboardHistory</AssemblyName>
     <RootNamespace>Lertaro.Plugins.ClipboardHistory</RootNamespace>
 
-    <Version>0.12.0</Version>
-    <AssemblyVersion>0.12.0.0</AssemblyVersion>
-    <FileVersion>0.12.0.0</FileVersion>
+    <Version>0.12.1</Version>
+    <AssemblyVersion>0.12.1.0</AssemblyVersion>
+    <FileVersion>0.12.1.0</FileVersion>
     <Description>Lertaro 原生插件：剪贴板历史（文本/图片/文件，持久化）</Description>
 
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <!-- 开发指南「打包与分发 §2」：编译后自动把产物拷到宿主的 Plugins\<插件名>\，即改即测。
+         Program Files 需要管理员权限；非提权编译时 Copy 失败但不影响构建（ContinueOnError）。
+         需要临时跳过：dotnet build -p:LertaroSkipDeploy=true -->
+    <LertaroPluginsDir Condition="'$(LertaroPluginsDir)' == ''">$(ProgramFiles)\Lertaro\Plugins</LertaroPluginsDir>
   </PropertyGroup>
 
   <ItemGroup>
@@ -28,5 +33,12 @@
   <ItemGroup>
     <EmbeddedResource Include="Resources\Translations\**\*.json" />
   </ItemGroup>
+
+  <Target Name="DeployToLertaro" AfterTargets="Build" Condition="'$(LertaroSkipDeploy)' != 'true'">
+    <Copy SourceFiles="$(TargetDir)$(TargetName).dll;$(TargetDir)$(TargetName).pdb"
+          DestinationFolder="$(LertaroPluginsDir)\$(TargetName)"
+          SkipUnchangedFiles="true"
+          ContinueOnError="true" />
+  </Target>
 
 </Project>

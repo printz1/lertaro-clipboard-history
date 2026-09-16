@@ -23,5 +23,9 @@
   "ClipboardHistory_Config_ReminderSound_Label": "提醒提示音",
   "ClipboardHistory_Config_ReminderSound_Desc": "待办提醒或置顶到期时播放系统“提醒”音（跟随系统音量与静音状态，系统静音时不会响）。",
   "ClipboardHistory_Config_SortTodosByDue_Label": "待办按紧急度排序",
-  "ClipboardHistory_Config_SortTodosByDue_Desc": "待办分组内按临近时间排序：越接近提醒时刻的越靠上，已错过的排在最顶部；关闭后按加入时间倒序。"
+  "ClipboardHistory_Config_SortTodosByDue_Desc": "待办筛选视图内按临近时间排序：越接近提醒时刻的越靠上，已错过的排在最顶部；关闭后按加入时间倒序。默认时间轴不受影响。",
+  "ClipboardHistory_Config_TodoAutoPin_Label": "待办自动置顶",
+  "ClipboardHistory_Config_TodoAutoPin_Desc": "标记待办时自动把它浮到“置顶”分组。默认关闭 —— 标记只附加属性、不改变条目位置；打开后待办会自动置顶（旧行为）。",
+  "ClipboardHistory_Config_WhenQuickOptions_Label": "时间选择器的快捷项",
+  "ClipboardHistory_Config_WhenQuickOptions_Desc": "置顶/提醒弹窗里显示的快捷项，一行一条，点击那一刻解析。支持：5 分钟后 / 1 小时后 / 3 天后 / 今天 18:00 / 明天 9:00 / 9-17 14:30。日历与时/分点选始终可用，这里只是便利项。"
 }

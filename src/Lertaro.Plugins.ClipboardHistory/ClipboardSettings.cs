@@ -78,6 +78,30 @@ internal sealed class ClipboardSettings
     /// <summary>待办按紧急度排序：临近时间越近越靠上（已错过的排最顶）。</summary>
     public bool SortTodosByDue { get; set; } = true;
 
+    /// <summary>
+    /// 标记待办时自动置顶。默认关 —— 标记只应附加属性，不改变条目位置；
+    /// 打开后待办会自动浮到"置顶"组（旧行为）。
+    /// </summary>
+    public bool TodoAutoPin { get; set; }
+
+    /// <summary>
+    /// 时间选择弹窗里的快捷项（可自由配置，点击那一刻按此处文本解析）。
+    /// 支持：5 分钟后 / 1 小时后 / 3 天后 / 今天 18:00 / 明天 9:00 / 9-17 14:30 等。
+    /// 日历 + 时/分点选始终可用，因此这里只是便利项，不构成任何限制。
+    /// </summary>
+    public List<string> WhenQuickOptions { get; set; } =
+    [
+        "5 分钟后",
+        "15 分钟后",
+        "30 分钟后",
+        "1 小时后",
+        "今天 18:00",
+        "明天 9:00",
+        "明天 14:00",
+        "3 天后",
+        "下周此时"
+    ];
+
     internal ClipboardSettings Clone() => new()
     {
         Hotkey = Hotkey,
@@ -91,7 +115,9 @@ internal sealed class ClipboardSettings
         PersistHistory = PersistHistory,
         HoverPreview = HoverPreview,
         ReminderSound = ReminderSound,
-        SortTodosByDue = SortTodosByDue
+        SortTodosByDue = SortTodosByDue,
+        TodoAutoPin = TodoAutoPin,
+        WhenQuickOptions = [.. WhenQuickOptions]
     };
 
     /// <summary>把副本的规范化结果写回当前设置并落盘。</summary>
@@ -111,10 +137,37 @@ internal sealed class ClipboardSettings
             HoverPreview = staged.HoverPreview;
             ReminderSound = staged.ReminderSound;
             SortTodosByDue = staged.SortTodosByDue;
+            TodoAutoPin = staged.TodoAutoPin;
+            WhenQuickOptions = NormalizeQuickOptions(staged.WhenQuickOptions);
             _current = this;
         }
 
         Save();
+    }
+
+    /// <summary>快捷项规范化：去空白、丢空项、去重、上限 24 条。</summary>
+    internal static List<string> NormalizeQuickOptions(IEnumerable<string>? options)
+    {
+        var result = new List<string>();
+        if (options is not null)
+        {
+            foreach (var raw in options)
+            {
+                var value = raw?.Trim();
+                if (string.IsNullOrEmpty(value) || result.Contains(value))
+                {
+                    continue;
+                }
+
+                result.Add(value);
+                if (result.Count >= 24)
+                {
+                    break;
+                }
+            }
+        }
+
+        return result.Count > 0 ? result : [.. new ClipboardSettings().WhenQuickOptions];
     }
 
     internal static List<string> NormalizeKeywords(IEnumerable<string>? keywords)
@@ -176,6 +229,7 @@ internal sealed class ClipboardSettings
                     loaded.TriggerKeywords = NormalizeKeywords(loaded.TriggerKeywords);
                     loaded.MaxEntries = Math.Clamp(loaded.MaxEntries, 50, 200_000);
                     loaded.RetentionDays = Math.Clamp(loaded.RetentionDays, 0, 3650);
+                    loaded.WhenQuickOptions = NormalizeQuickOptions(loaded.WhenQuickOptions);
                     loaded.MaxImageMB = Math.Clamp(loaded.MaxImageMB, 1, 200);
                     if (string.IsNullOrWhiteSpace(loaded.Hotkey))
                     {

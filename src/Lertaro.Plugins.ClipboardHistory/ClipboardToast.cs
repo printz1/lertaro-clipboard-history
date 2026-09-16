@@ -7,15 +7,19 @@ using System.Windows.Threading;
 namespace Lertaro.Plugins.ClipboardHistory;
 
 /// <summary>
-/// 通知浮窗：右下角、置顶显示、不抢焦点（ShowActivated=false）、6 秒自动消失。
-/// 点击浮窗打开剪贴板面板 —— 系统 Toast 需要 24 MB WinRT 依赖且点击回调做不了，
-/// 因此这里自绘（零依赖、可点击、不受免打扰影响）。
+/// 通知浮窗：右下角、置顶显示、不抢焦点（ShowActivated=false）、8 秒自动消失，点击跳转到条目。
+///
+/// 三个修正（用户实测反馈）：
+///   1. 声音：改用 winmm PlaySound 播放系统通知音（MessageBeep 在部分声音方案下无声），
+///      失败再回退 MessageBeep；开关沿用设置里的"提醒提示音"。
+///   2. 配色：与主面板同一套主题 —— 优先用面板采样到的画刷，未打开过面板时按深浅色兜底。
+///   3. 排版：按 左侧色条 / 标题行（含关闭） / 正文 / 提示 四段布局，不再用 Grid 叠加。
 /// </summary>
 internal sealed class ClipboardToast : Window
 {
-    private const double ToastWidth = 340;
-    private const double ToastHeight = 104;
-    private const double EdgeMargin = 12; // 不能叫 Margin：会遮蔽 FrameworkElement.Margin
+    private const double ToastWidth = 360;
+    private const double ToastHeight = 108;
+    private const double EdgeMargin = 12;
     private const double Gap = 8;
 
     private static readonly List<ClipboardToast> Active = [];
@@ -23,6 +27,11 @@ internal sealed class ClipboardToast : Window
 
     private ClipboardToast(ClipboardDueEvent due)
     {
+        var isRemind = due.Kind == ClipboardDueKind.Remind;
+        var accent = isRemind
+            ? Color.FromRgb(0xE0, 0x8A, 0x2E)
+            : Color.FromRgb(0x5A, 0x8F, 0xD6);
+
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
@@ -30,68 +39,92 @@ internal sealed class ClipboardToast : Window
         ShowActivated = false;
         Topmost = true;
         ResizeMode = ResizeMode.NoResize;
-        SizeToContent = SizeToContent.Manual;
         Width = ToastWidth;
         Height = ToastHeight;
         Title = "剪贴板提醒";
 
-        var isRemind = due.Kind == ClipboardDueKind.Remind;
-        var accent = isRemind
-            ? Color.FromRgb(0xE0, 0x8A, 0x2E)
-            : Color.FromRgb(0x5A, 0x8F, 0xD6);
-
-        var bar = new Border
-        {
-            Width = 4,
-            CornerRadius = new CornerRadius(2),
-            Background = new SolidColorBrush(accent),
-            Margin = new Thickness(0, 0, 10, 0)
-        };
-
+        // ---- 标题行：标题 + 关闭（同一行，不重叠）----
         var title = new TextBlock
         {
             Text = isRemind ? "待办提醒" : "置顶已到期",
             FontSize = 12.5,
             FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
             Foreground = new SolidColorBrush(accent)
         };
+
+        var close = new Border
+        {
+            Padding = new Thickness(6, 0, 4, 0),
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Child = new TextBlock
+            {
+                Text = "关闭",
+                FontSize = 11,
+                Opacity = 0.55,
+                Foreground = ClipboardPanel.ThemeText
+            }
+        };
+
+        close.MouseEnter += (_, _) => close.Opacity = 0.8;
+        close.MouseLeave += (_, _) => close.Opacity = 1;
+        close.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            CloseToast();
+        };
+
+        var titleRow = new DockPanel { LastChildFill = false };
+        DockPanel.SetDock(close, Dock.Right);
+        titleRow.Children.Add(close);
+        titleRow.Children.Add(title);
 
         var body = new TextBlock
         {
             Text = due.Preview,
             FontSize = 13,
-            Margin = new Thickness(0, 4, 0, 0),
+            Margin = new Thickness(0, 5, 0, 0),
             TextWrapping = TextWrapping.Wrap,
-            MaxHeight = 36,
-            TextTrimming = TextTrimming.CharacterEllipsis
+            MaxHeight = 40,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Foreground = ClipboardPanel.ThemeText
         };
 
         var hint = new TextBlock
         {
-            Text = "点击查看该条目",
-            FontSize = 11,
-            Opacity = 0.55,
-            Margin = new Thickness(0, 6, 0, 0)
+            Text = "点击打开面板并定位该条目 · 记录可在面板底部“通知”里回看",
+            FontSize = 10.5,
+            Opacity = 0.5,
+            Margin = new Thickness(0, 4, 0, 0),
+            Foreground = ClipboardPanel.ThemeText
         };
 
-        var text = new StackPanel();
-        text.Children.Add(title);
+        var text = new StackPanel { Margin = new Thickness(11, 8, 10, 8) };
+        text.Children.Add(titleRow);
         text.Children.Add(body);
         text.Children.Add(hint);
 
-        var row = new StackPanel { Orientation = Orientation.Horizontal };
-        row.Children.Add(bar);
-        row.Children.Add(text);
+        var bar = new Border
+        {
+            Width = 4,
+            Background = new SolidColorBrush(accent)
+        };
+
+        var layout = new DockPanel { LastChildFill = true };
+        DockPanel.SetDock(bar, Dock.Left);
+        layout.Children.Add(bar);
+        layout.Children.Add(text);
 
         var surface = new Border
         {
             CornerRadius = new CornerRadius(10),
-            Padding = new Thickness(12, 10, 12, 10),
-            Background = SystemColors.WindowBrush,
-            BorderBrush = new SolidColorBrush(accent),
+            Background = ClipboardPanel.ThemeSurface,
+            BorderBrush = ClipboardPanel.ThemeBorder,
             BorderThickness = new Thickness(1),
-            Child = row,
-            Cursor = Cursors.Hand
+            Cursor = Cursors.Hand,
+            Child = layout
         };
 
         surface.MouseLeftButtonUp += (_, _) =>
@@ -102,28 +135,7 @@ internal sealed class ClipboardToast : Window
 
         Content = surface;
 
-        var close = new Button
-        {
-            Content = "×",
-            Width = 20,
-            Height = 20,
-            FontSize = 12,
-            BorderThickness = new Thickness(0),
-            Background = Brushes.Transparent,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(0, 4, 6, 0),
-            ToolTip = "关闭"
-        };
-        close.Click += (_, _) => CloseToast();
-
-        // 关闭按钮浮在卡片上层（Grid 叠加）
-        var layer = new Grid();
-        layer.Children.Add(surface);
-        layer.Children.Add(close);
-        Content = layer;
-
-        _closeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
+        _closeTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
         _closeTimer.Tick += (_, _) => CloseToast();
         _closeTimer.Start();
 
@@ -134,12 +146,14 @@ internal sealed class ClipboardToast : Window
         };
     }
 
-    /// <summary>弹出一条通知（含提示音，可在设置中关闭）。必须在 UI 线程调用。</summary>
+    /// <summary>弹出一条通知（含提示音设置与通知记录）。必须在 UI 线程调用。</summary>
     internal static void Show(ClipboardDueEvent due)
     {
+        ClipboardNotificationLog.Add(due);
+
         if (ClipboardSettings.Current.ReminderSound)
         {
-            NativeMethods.MessageBeep(NativeMethods.MbIconAsterisk);
+            ClipboardSounds.PlayReminder();
         }
 
         var toast = new ClipboardToast(due);
@@ -165,9 +179,7 @@ internal sealed class ClipboardToast : Window
         }
     }
 
-    /// <summary>
-    /// 关闭本条通知。注意：不能命名为 Close —— 会遮蔽 <see cref="Window.Close"/> 造成无限递归。
-    /// </summary>
+    /// <summary>关闭本条通知。不能命名为 Close —— 会遮蔽 Window.Close 造成无限递归。</summary>
     private void CloseToast()
     {
         _closeTimer.Stop();

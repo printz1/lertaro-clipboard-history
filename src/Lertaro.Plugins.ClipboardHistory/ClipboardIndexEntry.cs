@@ -129,6 +129,17 @@ internal sealed class ClipboardIndexEntry
     /// <summary>提醒时间（单次）。到点触发一次提醒后由 Store 清空。</summary>
     internal DateTime? RemindAt { get; set; }
 
+    /// <summary>待办已归档（完成）。归档 ≠ 删除：内容与记录保留，只是从进行中的待办里收起。</summary>
+    internal bool IsTodoArchived { get; set; }
+
+    internal DateTime? ArchivedAt { get; set; }
+
+    /// <summary>
+    /// 该条只存在于"收藏/待办"独立存储（不在历史里）。用于：取消最后一个标记时，
+    /// 若它已不属于历史，就从列表移除（内容只在 marks 存储里的条目不该继续占位）。
+    /// </summary>
+    internal bool MarksOnly { get; set; }
+
     // ---- 图片专属（文本条目为默认值） ----
 
     internal string ImagePath { get; } = string.Empty;
@@ -156,7 +167,7 @@ internal sealed class ClipboardIndexEntry
 
             if (IsTodo)
             {
-                text = "待办  ·  " + text;
+                text = (IsTodoArchived ? "已归档  ·  " : "待办  ·  ") + text;
             }
             else if (IsFavorite)
             {

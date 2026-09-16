@@ -530,15 +530,16 @@ internal sealed class ClipboardStore
             }
 
             entry.IsFavorite = !entry.IsFavorite;
+            var released = DropIfOrphaned(entry);
             _version++;
             _dirty = true;
-            return entry.IsFavorite;
+            return !released && entry.IsFavorite;
         }
     }
 
     /// <summary>
-    /// 切换待办。标记待办时默认永久置顶（PinnedUntil 保持 null = 无期限）；
-    /// 取消待办同时取消置顶。待办与收藏同级豁免淘汰。
+    /// 切换待办。**标记不改变位置**：默认不自动置顶（设置 TodoAutoPin 打开时才置顶）；
+    /// 取消待办时若该条已无任何标记且只存在于标记存储里，则从列表移除。
     /// </summary>
     internal bool ToggleTodo(long id)
     {
@@ -553,24 +554,74 @@ internal sealed class ClipboardStore
             entry.IsTodo = !entry.IsTodo;
             if (entry.IsTodo)
             {
-                if (!entry.IsPinned)
-                {
-                    entry.IsPinned = true;
-                    _pinnedCount++;
-                }
+                entry.IsTodoArchived = false;
+                entry.ArchivedAt = null;
 
-                entry.PinnedUntil = null;
+                if (ClipboardSettings.Current.TodoAutoPin)
+                {
+                    SetPinnedCore(entry, true, null);
+                }
             }
             else
             {
+                entry.RemindAt = null;
+                entry.IsTodoArchived = false;
+                entry.ArchivedAt = null;
+            }
+
+            var released = DropIfOrphaned(entry);
+            _version++;
+            _dirty = true;
+            return !released && entry.IsTodo;
+        }
+    }
+
+    /// <summary>归档 / 取消归档待办。归档 ≠ 删除：内容与记录都保留，只是从进行中收起。</summary>
+    internal bool ToggleTodoArchive(long id)
+    {
+        lock (_gate)
+        {
+            var entry = _index.Find(e => e.Id == id);
+            if (entry is null || !entry.IsTodo)
+            {
+                return false;
+            }
+
+            entry.IsTodoArchived = !entry.IsTodoArchived;
+            entry.ArchivedAt = entry.IsTodoArchived ? DateTime.Now : null;
+            if (entry.IsTodoArchived)
+            {
+                // 归档即完成：提醒与置顶一并撤销，避免归档项继续提醒
                 entry.RemindAt = null;
                 SetPinnedCore(entry, false, null);
             }
 
             _version++;
             _dirty = true;
-            return entry.IsTodo;
+            return entry.IsTodoArchived;
         }
+    }
+
+    /// <summary>
+    /// 取消标记后，若该条已无任何标记、且内容只存在于标记存储（不在历史里），
+    /// 就从列表移除 —— 它的内容本就只因为"被标记"才被保留。返回是否已移除。
+    /// </summary>
+    private bool DropIfOrphaned(ClipboardIndexEntry entry)
+    {
+        if (entry.IsFavorite || entry.IsTodo || !entry.MarksOnly)
+        {
+            return false;
+        }
+
+        var position = _index.IndexOf(entry);
+        if (position >= 0)
+        {
+            RemoveAt(position);
+            _version++;
+            _dirty = true;
+        }
+
+        return true;
     }
 
     /// <summary>设置置顶及其到期时间（null = 无期限）。</summary>
@@ -590,7 +641,7 @@ internal sealed class ClipboardStore
         }
     }
 
-    /// <summary>取消置顶（不动收藏/待办标记；待办会一并取消，避免"待办却不置顶"的矛盾状态）。</summary>
+    /// <summary>取消置顶（不动收藏/待办标记 —— 标记与位置解耦）。</summary>
     internal void ClearPin(long id)
     {
         lock (_gate)
@@ -602,7 +653,6 @@ internal sealed class ClipboardStore
             }
 
             SetPinnedCore(entry, false, null);
-            entry.IsTodo = false;
             _version++;
             _dirty = true;
         }
@@ -622,8 +672,14 @@ internal sealed class ClipboardStore
             entry.RemindAt = at;
             if (at is not null)
             {
+                // 设提醒即视为待办（标记），但不改变位置 —— 除非用户开了"待办自动置顶"
                 entry.IsTodo = true;
-                SetPinnedCore(entry, true, null);
+                entry.IsTodoArchived = false;
+                entry.ArchivedAt = null;
+                if (ClipboardSettings.Current.TodoAutoPin)
+                {
+                    SetPinnedCore(entry, true, null);
+                }
             }
 
             _version++;
@@ -842,6 +898,8 @@ internal sealed class ClipboardStore
         public bool X { get; set; }         // 已固定
         public bool F { get; set; }         // 已收藏（永久保留）
         public bool TD { get; set; }        // 待办（T 已被文本全文占用）
+        public bool AR { get; set; }        // 待办已归档
+        public long? AA { get; set; }       // 归档时刻 ticks
         public long? PU { get; set; }       // 置顶到期 ticks
         public long? RA { get; set; }       // 提醒时刻 ticks
     }
@@ -856,7 +914,12 @@ internal sealed class ClipboardStore
     private static readonly JsonSerializerOptions PersistOptions = new() { WriteIndented = false };
 
     /// <summary>全量快照写盘（临时文件 + File.Replace 原子替换）。锁内取数，锁外写盘。</summary>
-    internal void Persist(string path)
+    /// <summary>
+    /// 落盘。**收藏/待办与普通历史分开存储**：
+    ///   - marksPath：收藏或待办的条目（含内容），永不淘汰，不受"重启保留历史"开关影响；
+    ///   - historyPath：其余条目。传 null 表示不写历史（持久化关闭时只保标记数据）。
+    /// </summary>
+    internal void Persist(string? historyPath, string marksPath)
     {
         var state = new PersistedState();
         var textCount = 0;
@@ -888,7 +951,9 @@ internal sealed class ClipboardStore
                         F = entry.IsFavorite,
                         TD = entry.IsTodo,
                         PU = entry.PinnedUntil?.Ticks,
-                        RA = entry.RemindAt?.Ticks
+                        RA = entry.RemindAt?.Ticks,
+                        AR = entry.IsTodoArchived,
+                        AA = entry.ArchivedAt?.Ticks
                     });
                 }
                 else if (entry.Kind == ClipboardEntryKind.File)
@@ -912,7 +977,9 @@ internal sealed class ClipboardStore
                         F = entry.IsFavorite,
                         TD = entry.IsTodo,
                         PU = entry.PinnedUntil?.Ticks,
-                        RA = entry.RemindAt?.Ticks
+                        RA = entry.RemindAt?.Ticks,
+                        AR = entry.IsTodoArchived,
+                        AA = entry.ArchivedAt?.Ticks
                     });
                 }
                 else
@@ -937,165 +1004,221 @@ internal sealed class ClipboardStore
                         F = entry.IsFavorite,
                         TD = entry.IsTodo,
                         PU = entry.PinnedUntil?.Ticks,
-                        RA = entry.RemindAt?.Ticks
+                        RA = entry.RemindAt?.Ticks,
+                        AR = entry.IsTodoArchived,
+                        AA = entry.ArchivedAt?.Ticks
                     });
                 }
             }
         }
 
-        try
+        // 按"是否带标记"拆成两份：marks 独立落盘（永不受淘汰与保留设置影响）
+        var marksState = new PersistedState { N = state.N };
+        var historyOnly = new List<PersistedEntry>(state.E.Count);
+        foreach (var persisted in state.E)
         {
-            var directory = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(directory))
+            if (persisted.F || persisted.TD)
             {
-                Directory.CreateDirectory(directory);
-            }
-
-            var temp = path + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(state, PersistOptions));
-
-            if (File.Exists(path))
-            {
-                File.Replace(temp, path, null);
+                marksState.E.Add(persisted);
             }
             else
             {
-                File.Move(temp, path);
+                historyOnly.Add(persisted);
             }
+        }
 
-            // 带条目数与实例号：线上若再出现"文本捕获成功但快照里没有"，
-            // 这行能立刻分辨是 store 分叉还是写入丢失
+        state.E = historyOnly;
+
+        try
+        {
+            WriteState(marksPath, marksState);
             ClipboardListener.Log(
-                "history persisted: " + state.E.Count + " entries (text=" + textCount + ", image=" + imageCount + "), store#" + InstanceId,
+                "marks persisted: " + marksState.E.Count + " entries, store#" + InstanceId,
                 LogLevel.Debug);
+
+            if (historyPath is not null)
+            {
+                WriteState(historyPath, state);
+                ClipboardListener.Log(
+                    "history persisted: " + state.E.Count + " entries (text=" + textCount + ", image=" + imageCount + "), store#" + InstanceId,
+                    LogLevel.Debug);
+            }
         }
         catch (Exception ex)
         {
-            ClipboardListener.Log("history persist failed: " + ex.Message, LogLevel.Warn);
+            ClipboardListener.Log("persist failed: " + ex.Message, LogLevel.Warn);
+        }
+    }
+
+    private static void WriteState(string path, PersistedState state)
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var temp = path + ".tmp";
+        File.WriteAllText(temp, JsonSerializer.Serialize(state, PersistOptions));
+
+        if (File.Exists(path))
+        {
+            File.Replace(temp, path, null);
+        }
+        else
+        {
+            File.Move(temp, path);
         }
     }
 
     /// <summary>
     /// 从快照恢复；文件不存在或损坏返回全新实例（损坏时不带病运行）。
+    /// **先读标记存储（收藏/待办，独立文件），再合并历史**：同一指纹以"在历史里"为准
+    /// （MarksOnly=false），因此取消全部标记后它仍作为普通历史存在。
     /// 文本条目的指纹用全文重算，与原始哈希必然一致；图片条目的指纹是对
     /// 剪贴板原始字节算的，重算不出来，所以直接存进快照。
     /// </summary>
-    internal static ClipboardStore LoadOrCreate(int capacity, TimeSpan maxAge, string path, long payloadCharBudget = 64L * 1024 * 1024)
+    internal static ClipboardStore LoadOrCreate(
+        int capacity,
+        TimeSpan maxAge,
+        string historyPath,
+        string marksPath,
+        bool loadHistory,
+        long payloadCharBudget = 64L * 1024 * 1024)
     {
         var store = new ClipboardStore(capacity, maxAge, payloadCharBudget);
-
-        if (!File.Exists(path))
-        {
-            return store;
-        }
-
-        PersistedState? state;
-        try
-        {
-            state = JsonSerializer.Deserialize<PersistedState>(File.ReadAllText(path), PersistOptions);
-        }
-        catch (Exception ex)
-        {
-            ClipboardListener.Log("history restore failed, starting empty: " + ex.Message, LogLevel.Warn);
-            return store;
-        }
-
-        if (state is null || state.E.Count == 0)
-        {
-            return store;
-        }
-
         var restored = 0;
         var images = 0;
 
-        lock (store._gate)
+        void Restore(string? path, bool marksOrigin)
         {
-            // 恢复条目一律分配全新的连续 id —— 快照里没存每条的 id（只有 nextId），
-            // 而条目 Id 是只读的；用 0 会让所有恢复条目在 _payloads/_imagePayloads
-            // 里挤在同一个键上互相覆盖（ v0.6.0 的真实 bug）。
-            foreach (var item in state.E)
+            if (path is null || !File.Exists(path))
             {
-                if (!ulong.TryParse(item.H, out var hash))
-                {
-                    continue;
-                }
-
-                ClipboardIndexEntry entry;
-                if (item.K == 0)
-                {
-                    if (string.IsNullOrEmpty(item.T))
-                    {
-                        continue;
-                    }
-
-                    entry = new ClipboardIndexEntry(store._nextId++, item.T, item.S, new DateTime(item.C, DateTimeKind.Local));
-                }
-                else if (item.K == 2)
-                {
-                    // 文件条目：T 是路径清单
-                    if (string.IsNullOrEmpty(item.T))
-                    {
-                        continue;
-                    }
-
-                    var fileCount = item.L > 0 ? (int)item.L : item.T.Split('\n').Length;
-                    entry = new ClipboardIndexEntry(store._nextId++, hash, fileCount, item.T, item.S, new DateTime(item.C, DateTimeKind.Local));
-                }
-                else
-                {
-                    if (string.IsNullOrEmpty(item.P) || !File.Exists(item.P))
-                    {
-                        continue; // 图片文件已被外部删除，条目作废
-                    }
-
-                    entry = new ClipboardIndexEntry(
-                        store._nextId++, hash, item.W, item.G,
-                        item.L > 0 ? item.L : new FileInfo(item.P).Length,
-                        item.P, item.S, new DateTime(item.C, DateTimeKind.Local));
-                    images++;
-                }
-
-                // 同一指纹只留一条（理论上不该发生，防快照里出现重复）
-                if (store._byHash.ContainsKey(hash))
-                {
-                    continue;
-                }
-
-                entry.IsPinned = item.X;
-                entry.IsFavorite = item.F;
-                entry.IsTodo = item.TD;
-                entry.PinnedUntil = item.PU is { } pu ? new DateTime(pu) : null;
-                entry.RemindAt = item.RA is { } ra ? new DateTime(ra) : null;
-                if (entry.IsPinned)
-                {
-                    store._pinnedCount++;
-                }
-
-                store._index.Add(entry);   // 快照按新→旧顺序存，保持原序
-                store._byHash[hash] = entry;
-
-                if (entry.Kind == ClipboardEntryKind.Image)
-                {
-                    store._imagePayloads[entry.Id] = entry.ImagePath;
-                }
-                else
-                {
-                    store._payloads[entry.Id] = item.T!;
-                }
-
-                store._payloadChars += entry.Length;
-                restored++;
+                return;
             }
 
-            // 与旧快照的 nextId 取最大值，避免后续 Add 撞上历史 id
-            store._nextId = Math.Max(store._nextId, state.N);
+            PersistedState? state;
+            try
+            {
+                state = JsonSerializer.Deserialize<PersistedState>(File.ReadAllText(path), PersistOptions);
+            }
+            catch (Exception ex)
+            {
+                ClipboardListener.Log("snapshot read failed, skipping " + path + ": " + ex.Message, LogLevel.Warn);
+                return;
+            }
 
+            if (state is null || state.E.Count == 0)
+            {
+                return;
+            }
+
+            lock (store._gate)
+            {
+                foreach (var item in state.E)
+                {
+                    if (!ulong.TryParse(item.H, out var hash))
+                    {
+                        continue;
+                    }
+
+                    // 同指纹已存在（marks 先加载）：历史里的这份只负责把 MarksOnly 清掉
+                    if (store._byHash.TryGetValue(hash, out var existing))
+                    {
+                        if (!marksOrigin)
+                        {
+                            existing.MarksOnly = false;
+                        }
+
+                        continue;
+                    }
+
+                    ClipboardIndexEntry entry;
+                    if (item.K == 0)
+                    {
+                        if (string.IsNullOrEmpty(item.T))
+                        {
+                            continue;
+                        }
+
+                        entry = new ClipboardIndexEntry(store._nextId++, item.T, item.S, new DateTime(item.C, DateTimeKind.Local));
+                    }
+                    else if (item.K == 2)
+                    {
+                        // 文件条目：T 是路径清单
+                        if (string.IsNullOrEmpty(item.T))
+                        {
+                            continue;
+                        }
+
+                        var fileCount = item.L > 0 ? (int)item.L : item.T.Split('\n').Length;
+                        entry = new ClipboardIndexEntry(store._nextId++, hash, fileCount, item.T, item.S, new DateTime(item.C, DateTimeKind.Local));
+                    }
+                    else
+                    {
+                        if (string.IsNullOrEmpty(item.P))
+                        {
+                            continue;
+                        }
+
+                        if (!File.Exists(item.P))
+                        {
+                            continue; // 图片文件已被外部删除，条目作废
+                        }
+
+                        entry = new ClipboardIndexEntry(
+                            store._nextId++, hash, item.W, item.G,
+                            item.L > 0 ? item.L : new FileInfo(item.P).Length,
+                            item.P, item.S, new DateTime(item.C, DateTimeKind.Local));
+                        images++;
+                    }
+
+                    entry.IsPinned = item.X;
+                    entry.IsFavorite = item.F;
+                    entry.IsTodo = item.TD;
+                    entry.IsTodoArchived = item.AR;
+                    entry.ArchivedAt = item.AA is { } aa ? new DateTime(aa) : null;
+                    entry.PinnedUntil = item.PU is { } pu ? new DateTime(pu) : null;
+                    entry.RemindAt = item.RA is { } ra ? new DateTime(ra) : null;
+                    entry.MarksOnly = marksOrigin;
+                    if (entry.IsPinned)
+                    {
+                        store._pinnedCount++;
+                    }
+
+                    store._index.Add(entry);   // 快照按新→旧顺序存，保持原序
+                    store._byHash[hash] = entry;
+
+                    if (entry.Kind == ClipboardEntryKind.Image)
+                    {
+                        store._imagePayloads[entry.Id] = entry.ImagePath;
+                    }
+                    else
+                    {
+                        store._payloads[entry.Id] = item.T!;
+                    }
+
+                    store._payloadChars += entry.Length;
+                    restored++;
+                }
+
+                // 与旧快照的 nextId 取最大值，避免后续 Add 撞上历史 id
+                store._nextId = Math.Max(store._nextId, state.N);
+            }
+        }
+
+        Restore(marksPath, marksOrigin: true);
+        Restore(loadHistory ? historyPath : null, marksOrigin: false);
+
+        lock (store._gate)
+        {
             store.Trim();
         }
 
         store.DeletePendingImages();
         ClipboardListener.Log(
-            "history restored: " + restored + " entries (" + images + " images) from " + path,
+            "store loaded: " + restored + " entries (" + images + " images), store#" + store.InstanceId
+                + " (marks=" + marksPath + ", history=" + (loadHistory ? historyPath : "off") + ")",
             LogLevel.Info);
         return store;
     }

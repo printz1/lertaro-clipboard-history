@@ -129,14 +129,20 @@ public sealed class ClipboardHistoryPlugin : IPlugin, IInstantResultProvider, IA
 
             var historyPath = Path.Combine(ClipboardSettings.SettingsDirectory, "history.json");
 
+            // 收藏/待办独立存储：不受保留策略与"重启保留历史"开关影响，永远都在
+            var marksPath = Path.Combine(ClipboardSettings.SettingsDirectory, "marks.json");
+
             // 历史持久化（P2）：启动时从快照恢复文本全文与图片引用；
-            // 关闭持久化时保持旧行为（重启清空，缓存目录随之清掉）。
+            // 关闭持久化时保持旧行为（重启清空），但**标记数据仍然恢复**。
             // LoadOrCreate 自己抛异常绝不能带崩插件构造器 —— 退回空库，旧快照留在磁盘上不动。
             try
             {
-                _store = settings.PersistHistory
-                    ? ClipboardStore.LoadOrCreate(settings.MaxEntries, maxAge, historyPath)
-                    : new ClipboardStore(settings.MaxEntries, maxAge);
+                _store = ClipboardStore.LoadOrCreate(
+                    settings.MaxEntries,
+                    maxAge,
+                    historyPath,
+                    marksPath,
+                    loadHistory: settings.PersistHistory);
             }
             catch (Exception ex)
             {
@@ -160,20 +166,20 @@ public sealed class ClipboardHistoryPlugin : IPlugin, IInstantResultProvider, IA
                         try
                         {
                             var store = _store;
-                            if (store is not null
-                                && store.Dirty
-                                && ClipboardSettings.Current.PersistHistory)
+                            if (store is not null && store.Dirty)
                             {
+                                var persistHistory = ClipboardSettings.Current.PersistHistory;
+
                                 // 空库不覆盖非空快照：万一恢复环节出了岔子（或出现第二份
                                 // 插件实例），不能让一份空数据把用户的历史抹掉。
-                                if (store.Count == 0 && File.Exists(historyPath))
+                                if (persistHistory && store.Count == 0 && File.Exists(historyPath))
                                 {
                                     ClipboardListener.Log("persist skipped: store is empty but a snapshot exists on disk", LogLevel.Warn);
                                     return;
                                 }
 
-                                store.Persist(historyPath);
-                                ClipboardListener.Log("history persisted", LogLevel.Debug);
+                                // 标记数据始终落盘（收藏/待办独立于历史保留设置）
+                                store.Persist(persistHistory ? historyPath : null, marksPath);
                             }
                         }
                         catch (Exception ex)
@@ -185,6 +191,9 @@ public sealed class ClipboardHistoryPlugin : IPlugin, IInstantResultProvider, IA
                     PersistIntervalMs,
                     PersistIntervalMs);
             }
+
+            // 通知记录（浮窗消失后仍可回看）
+            ClipboardNotificationLog.Load();
 
             // 提醒调度启动：等宿主 UI 就绪后对准最近一次到期时刻（有就立即触发，完成"睡过头"补偿）。
             // 只在启动阶段重试几次，正常运行期间没有任何周期扫描。

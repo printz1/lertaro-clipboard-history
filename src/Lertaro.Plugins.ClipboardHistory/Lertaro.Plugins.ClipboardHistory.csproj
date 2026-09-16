@@ -9,9 +9,9 @@
     <AssemblyName>Lertaro.Plugins.ClipboardHistory</AssemblyName>
     <RootNamespace>Lertaro.Plugins.ClipboardHistory</RootNamespace>
 
-    <Version>0.11.0</Version>
-    <AssemblyVersion>0.11.0.0</AssemblyVersion>
-    <FileVersion>0.11.0.0</FileVersion>
+    <Version>0.12.0</Version>
+    <AssemblyVersion>0.12.0.0</AssemblyVersion>
+    <FileVersion>0.12.0.0</FileVersion>
     <Description>Lertaro 原生插件：剪贴板历史（文本/图片/文件，持久化）</Description>
 
     <GenerateDocumentationFile>false</GenerateDocumentationFile>

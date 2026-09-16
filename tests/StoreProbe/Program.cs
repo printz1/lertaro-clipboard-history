@@ -45,13 +45,14 @@ foreach (var e in store.Snapshot())
 Console.WriteLine("favorites=" + favCount);
 
 Console.WriteLine("== phase 2: persist ==");
-store.Persist(historyPath);
+var marksPath = Path.Combine(Path.GetDirectoryName(historyPath)!, "marks.json");
+store.Persist(historyPath, marksPath);
 var json = File.ReadAllText(historyPath);
 Console.WriteLine("json len=" + json.Length);
 Console.WriteLine("K0(text)=" + CountOccurrences(json, "\"K\":0") + " K1(image)=" + CountOccurrences(json, "\"K\":1"));
 
 Console.WriteLine("== phase 3: restore ==");
-var store2 = ClipboardStore.LoadOrCreate(5000, TimeSpan.FromDays(30), historyPath);
+var store2 = ClipboardStore.LoadOrCreate(5000, TimeSpan.FromDays(30), historyPath, marksPath, loadHistory: true);
 Console.WriteLine("restored count=" + store2.Count);
 
 var textOk = 0;
@@ -183,6 +184,53 @@ foreach (var e in todoTrim.Snapshot())
 Console.WriteLine("todo trim exemption: count=" + todoTrim.Count + " kept=" + todoKept);
 Console.WriteLine(todoTrim.Count == 3 && todoKept ? "TODO TRIM EXEMPTION = PASS" : "TODO TRIM EXEMPTION = FAIL");
 
+// ---- 标记与位置解耦 + 归档 + 独立持久化 ----
+var decouple = new ClipboardStore(100, TimeSpan.FromDays(30));
+decouple.Add("marked-item-content", "probe");
+var markedId = decouple.Snapshot()[0].Id;
+
+decouple.ToggleFavorite(markedId);
+decouple.ToggleTodo(markedId);           // 同一可条既收藏又待办（互斥是老实现的 bug）
+var marked = decouple.Snapshot().First(e => e.Id == markedId);
+var stacked = marked.IsFavorite && marked.IsTodo;
+var notPinned = !marked.IsPinned;        // 默认 TodoAutoPin = false：标记不改变位置
+Console.WriteLine("stacked favorite+todo=" + stacked + " autoPinned=" + marked.IsPinned);
+Console.WriteLine(stacked && notPinned ? "MARK DECOUPLED = PASS" : "MARK DECOUPLED = FAIL");
+
+// 归档：记录与内容保留，且与删除区分（归档后条目仍在库里）
+var archived = decouple.ToggleTodoArchive(markedId);
+var archivedEntry = decouple.Snapshot().First(e => e.Id == markedId);
+var stillPresent = decouple.Snapshot().Any(e => e.Id == markedId);
+Console.WriteLine("archive=" + archived + " keptInStore=" + stillPresent + " archivedAt=" + (archivedEntry.ArchivedAt is not null));
+Console.WriteLine(archived && stillPresent && archivedEntry.IsTodoArchived ? "TODO ARCHIVE = PASS" : "TODO ARCHIVE = FAIL");
+
+// 独立持久化：marks 与 history 分开落盘，且 marks 内容不写进 history
+var markRoot = Path.Combine(Path.GetTempPath(), "cb_probe_marks");
+Directory.CreateDirectory(markRoot);
+var mHistory = Path.Combine(markRoot, "h.json");
+var mMarks = Path.Combine(markRoot, "m.json");
+decouple.Persist(mHistory, mMarks);
+var historyJson = File.Exists(mHistory) ? File.ReadAllText(mHistory) : string.Empty;
+var marksJson = File.Exists(mMarks) ? File.ReadAllText(mMarks) : string.Empty;
+var marksHasContent = marksJson.Contains("marked-item-content", StringComparison.Ordinal);
+var historyHasContent = historyJson.Contains("marked-item-content", StringComparison.Ordinal);
+Console.WriteLine("marksFileHasMarked=" + marksHasContent + " historyFileHasMarked=" + historyHasContent);
+
+// 只加载 marks（模拟"重启不保留历史"）：标记与内容仍在
+var marksOnlyStore = ClipboardStore.LoadOrCreate(100, TimeSpan.FromDays(30), mHistory, mMarks, loadHistory: false);
+var survived = marksOnlyStore.Snapshot().Any(e => e.IsFavorite && e.IsTodo);
+var textAlive = !string.IsNullOrEmpty(marksOnlyStore.TryGetText(marksOnlyStore.Snapshot()[0].Id));
+Console.WriteLine("marks-only restore: count=" + marksOnlyStore.Count + " markSurvived=" + survived + " contentAlive=" + textAlive);
+Console.WriteLine(marksHasContent && !historyHasContent && survived && textAlive
+    ? "MARKS INDEPENDENT PERSIST = PASS"
+    : "MARKS INDEPENDENT PERSIST = FAIL");
+
+// 取消最后一个标记：内容只存在于 marks 的条目应从列表移除
+marksOnlyStore.ToggleFavorite(marksOnlyStore.Snapshot()[0].Id);
+marksOnlyStore.ToggleTodo(marksOnlyStore.Snapshot()[0].Id);
+Console.WriteLine("after unmark all: count=" + marksOnlyStore.Count);
+Console.WriteLine(marksOnlyStore.Count == 0 ? "ORPHAN MARK RELEASED = PASS" : "ORPHAN MARK RELEASED = FAIL");
+
 Console.WriteLine(textOk == 2 && imageOk == 2 ? "RESULT = PASS" : "RESULT = FAIL (textOk=" + textOk + " imageOk=" + imageOk + ")");
 
 // ---- phase 3.5: from: 来源筛选 ----
@@ -219,20 +267,21 @@ for (var i = 0; i < 5000; i++)
 Console.WriteLine("populated count=" + scaleStore.Count);
 
 var sw = System.Diagnostics.Stopwatch.StartNew();
-scaleStore.Persist(scalePath);
+var scaleMarks = Path.Combine(Path.GetDirectoryName(scalePath)!, "scale-marks.json");
+scaleStore.Persist(scalePath, scaleMarks);
 sw.Stop();
 Console.WriteLine("persist 5000 entries: " + sw.ElapsedMilliseconds + " ms");
 
 Console.WriteLine("json size=" + (new FileInfo(scalePath).Length / 1024.0).ToString("0") + " KB");
 
 sw.Restart();
-var restored2 = ClipboardStore.LoadOrCreate(5000, TimeSpan.FromDays(30), scalePath);
+var restored2 = ClipboardStore.LoadOrCreate(5000, TimeSpan.FromDays(30), scalePath, scaleMarks, loadHistory: true);
 sw.Stop();
 Console.WriteLine("restore 5000 entries: " + sw.ElapsedMilliseconds + " ms (count=" + restored2.Count + ")");
 
 // 二次 Persist（去重后已置顶的稳态改写，内容相同）
 sw.Restart();
-restored2.Persist(scalePath);
+restored2.Persist(scalePath, scaleMarks);
 sw.Stop();
 Console.WriteLine("re-persist (unchanged data): " + sw.ElapsedMilliseconds + " ms");
 

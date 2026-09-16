@@ -31,12 +31,33 @@ internal static class ClipboardPanel
 
     private static PluginWindow? _window;
     private static ListBox? _list;
+
+    /// <summary>
+    /// 顶部筛选 chip 那一行的容器。**直接持有引用**，不要靠"遍历窗口内容树"去找它：
+    /// 那条路径依赖宿主 PluginWindow 怎么包 Content，宿主一变就静默失败，
+    /// 结果就是 ★收藏 / ☐待办 两个 chip 永远建不出来（v0.12.0 实测踩过）。
+    /// </summary>
+    private static StackPanel? _chipsRow;
     private static TextBox? _search;
     private static TextBlock? _watermark;
     private static TextBlock? _hint;
     private static IntPtr _previousForeground;
     private static ClipType _typeFilter = ClipType.All;
+    private static MarkFilter _markFilter = MarkFilter.None;
     private static System.Windows.Threading.DispatcherTimer? _refreshTimer;
+    /// <summary>时间选择弹窗复用的主题画刷（与面板同一套采样值）。</summary>
+    internal static Brush ThemeSurface => _themeSurface ?? SystemColors.WindowBrush;
+
+    internal static Brush ThemeBorder => _themeBorderBrush ?? SystemColors.ControlDarkBrush;
+
+    internal static Brush ThemeText => _themeText ?? SystemColors.ControlTextBrush;
+
+    internal static Brush ThemeHover => _themeHover ?? Brushes.Transparent;
+
+    internal static Brush ThemeSelected => _themeSelected ?? Brushes.Transparent;
+
+    internal static Brush ThemeAccent => _accentBrush;
+
     private static bool _rebuilding;
 
     private static Brush _accentBrush = Brushes.Transparent;
@@ -56,6 +77,10 @@ internal static class ClipboardPanel
     private static string _sourceSignature = string.Empty;
     private static bool _suppressComboEvents;
     private static Button? _closeButton;
+    private static Button? _notifyButton;
+    private static Popup? _notifyPopup;
+    private static bool _notifyTodayOnly = true;
+    private static long _justArchivedId;
 
     private static DateTime? _timeFilterFrom;
     private static DateTime? _timeFilterTo;
@@ -95,11 +120,18 @@ internal static class ClipboardPanel
         Image
     }
 
+    /// <summary>状态筛选（与类型筛选正交、可叠加）。None = 不筛。</summary>
+    private enum MarkFilter
+    {
+        None,
+        Favorite,
+        Todo
+    }
+
     private sealed class Row
     {
         internal ClipboardIndexEntry Entry = null!;
         internal ListBoxItem Container = null!;
-        internal Border Accent = null!;
         internal Image? Thumbnail;
     }
 
@@ -185,6 +217,13 @@ internal static class ClipboardPanel
         _sourceFilter = null;
         _sourceSignature = string.Empty;
 
+        // 每次打开面板都回到"全部"视图：不残留上次的收藏/待办/类型/时间筛选
+        _typeFilter = ClipType.All;
+        _markFilter = MarkFilter.None;
+        _timeFilterFrom = null;
+        _timeFilterTo = null;
+        _timeFilterLabel = null;
+
         var root = new DockPanel { LastChildFill = true };
 
         // ---- 顶部：搜索框 + 来源下拉 + 类型筛选 ----
@@ -252,17 +291,8 @@ internal static class ClipboardPanel
             Margin = new Thickness(0, 8, 0, 0)
         };
 
-        foreach (var (label, type) in new[]
-        {
-            ("全部", ClipType.All),
-            ("文本", ClipType.Text),
-            ("文件", ClipType.File),
-            ("图片", ClipType.Image)
-        })
-        {
-            chips.Children.Add(MakeChip(label, type, store, accent));
-        }
-
+        // chip 由 RebuildChips 统一重建（类型 + 状态筛选都在里面），这里只登记容器
+        _chipsRow = chips;
         header.Children.Add(chips);
 
         DockPanel.SetDock(header, Dock.Top);
@@ -273,12 +303,13 @@ internal static class ClipboardPanel
         _hint = new TextBlock
         {
             FontSize = 12,
-            Width = 640,
+            Width = 430, // 底部现在有三个按钮（收藏与待办 / 通知 / 关闭），留出空间避免被裁切
             Margin = new Thickness(12, 0, 12, 0),
-            TextAlignment = TextAlignment.Center,
+            TextAlignment = TextAlignment.Left,
+            TextTrimming = TextTrimming.CharacterEllipsis,
             VerticalAlignment = VerticalAlignment.Center,
             Opacity = 0.65,
-            Text = "↑↓ 选择 · Enter 粘贴 · 右键更多操作 · 悬停看全文 · Ctrl+F 收藏 · Ctrl+T 待办 · Ctrl+P 固定 · Ctrl+Del 删除"
+            Text = "↑↓ 选择 · Enter 粘贴 · 右键更多操作 · Ctrl+F 收藏 · Ctrl+T 待办 · Ctrl+P 固定"
         };
 
         // ---- 中部：列表（行高固定两行；全文走悬停浮窗，业内通行的 Ditto/CopyQ 模式）----
@@ -309,6 +340,16 @@ internal static class ClipboardPanel
         {
             switch (e.Key)
             {
+                case Key.Escape when _notifyPopup is { IsOpen: true }:
+                    CloseNotificationLog();
+                    e.Handled = true;
+                    break;
+
+                case Key.Escape when ClipboardWhenPicker.IsOpen:
+                    ClipboardWhenPicker.Close();
+                    e.Handled = true;
+                    break;
+
                 case Key.Escape when _timelinePopup is { IsOpen: true }:
                     CloseTimeline();
                     e.Handled = true;
@@ -373,26 +414,31 @@ internal static class ClipboardPanel
             }
         };
 
-        // 点击时间线以外的地方时收起时间线（点时间分组头本身交给它自己做开关切换）
+        // 点击时间线/时间选择器以外的地方时收起它们（点分组头本身交给它自己做开关）
         window.PreviewMouseLeftButtonDown += (_, e) =>
         {
-            if (_timelinePopup is not { IsOpen: true })
-            {
-                return;
-            }
-
             var source = e.OriginalSource as DependencyObject;
-            while (source is not null)
+            var inTimeHeader = false;
+            for (var node = source; node is not null; node = System.Windows.Media.VisualTreeHelper.GetParent(node))
             {
-                if (source is Border { Tag: string tag } && tag == TimeHeaderTag)
+                if (node is Border { Tag: string tag } && tag == TimeHeaderTag)
                 {
-                    return;
+                    inTimeHeader = true;
+                    break;
                 }
-
-                source = System.Windows.Media.VisualTreeHelper.GetParent(source);
             }
 
-            CloseTimeline();
+            if (_timelinePopup is { IsOpen: true } && !inTimeHeader)
+            {
+                CloseTimeline();
+            }
+
+            // 选择器/菜单点外面即收起
+            if (!inTimeHeader)
+            {
+                ClipboardWhenPicker.Close();
+                CloseNotificationLog();
+            }
         };
 
         window.Closed += (_, _) =>
@@ -402,11 +448,14 @@ internal static class ClipboardPanel
 
             _window = null;
             _list = null;
+            _chipsRow = null;
             _search = null;
             _watermark = null;
             _hint = null;
             _sourceCombo = null;
             _sourceFilter = null;
+            _notifyButton = null;
+            CloseNotificationLog();
             _highlighted = null;
             Rows.Clear();
             Thumbs.Clear();
@@ -426,11 +475,24 @@ internal static class ClipboardPanel
         closeButton.Click += (_, _) => window.Close();
 
         // 提示条与关闭按钮同行；日志记录 Footer 实际面板类型，便于针对性调整布局
+        var notifyButton = new Button
+        {
+            // 一眼看到今天有多少通知
+            Content = "通知 (今日 " + ClipboardNotificationLog.TodayCount + " / 共 " + ClipboardNotificationLog.Count + ")",
+            MinWidth = 160,
+            Margin = new Thickness(6, 0, 0, 0)
+        };
+
+        _notifyButton = notifyButton;
+        notifyButton.Click += (_, _) => OpenNotificationLog(ClipboardHistoryPlugin.Store!);
+
         window.Footer.Children.Insert(0, _hint);
+        window.Footer.Children.Add(notifyButton);
         window.Footer.Children.Add(closeButton);
         ClipboardListener.Log("footer panel type: " + window.Footer.GetType().Name, LogLevel.Debug);
 
         _window = window;
+        RebuildChips(store, accent); // 初始就要把"收藏/待办"两个 chip 一起建出来（否则不点类型筛选它们不出现）
         Refresh(store);
         window.Show();
 
@@ -466,7 +528,7 @@ internal static class ClipboardPanel
         {
             Text = label,
             FontSize = 12,
-            Foreground = active ? new SolidColorBrush(accent) : SystemColors.ControlTextBrush
+            Foreground = active ? new SolidColorBrush(accent) : _themeText ?? SystemColors.ControlTextBrush
         };
 
         var chip = new Border
@@ -481,6 +543,7 @@ internal static class ClipboardPanel
             Cursor = Cursors.Hand
         };
 
+        // 类型筛选在"收藏 / 待办"视图里照样生效（可以只看"图片收藏"），不再置灰
         chip.MouseLeftButtonUp += (_, _) =>
         {
             _typeFilter = type;
@@ -493,25 +556,90 @@ internal static class ClipboardPanel
 
     private static void RebuildChips(ClipboardStore store, Color accent)
     {
-        // chips 容器是 header 的第二个子元素
-        if (_window?.ContentHostControl.Content is DockPanel root
-            && root.Children.Count > 0
-            && root.Children[0] is StackPanel header
-            && header.Children.Count > 1
-            && header.Children[1] is StackPanel chips)
+        var chips = _chipsRow;
+        if (chips is null)
         {
-            chips.Children.Clear();
-            foreach (var (label, type) in new[]
+            return;
+        }
+
+        chips.Children.Clear();
+        foreach (var (label, type) in new[]
+        {
+            ("全部", ClipType.All),
+            ("文本", ClipType.Text),
+            ("文件", ClipType.File),
+            ("图片", ClipType.Image)
+        })
+        {
+            chips.Children.Add(MakeChip(label, type, store, accent));
+        }
+
+        // 分隔：右侧是"状态筛选"，与类型筛选正交、可叠加
+        chips.Children.Add(new Border
+        {
+            Width = 1,
+            Margin = new Thickness(4, 4, 10, 4),
+            Background = _themeBorderBrush ?? SystemColors.ControlLightBrush
+        });
+
+        // 计数直接写在 chip 上：一眼能看到"我收藏了几条 / 还剩几件待办"，
+        // 不然点进去之前完全不知道里面有没有东西
+        var favorites = 0;
+        var todos = 0;
+        foreach (var entry in store.Snapshot())
+        {
+            if (entry.IsFavorite)
             {
-                ("全部", ClipType.All),
-                ("文本", ClipType.Text),
-                ("文件", ClipType.File),
-                ("图片", ClipType.Image)
-            })
+                favorites++;
+            }
+
+            if (entry.IsTodo && !entry.IsTodoArchived)
             {
-                chips.Children.Add(MakeChip(label, type, store, accent));
+                todos++;
             }
         }
+
+        chips.Children.Add(MakeMarkChip(ChipLabel("★ 收藏", favorites), MarkFilter.Favorite, store, accent));
+        chips.Children.Add(MakeMarkChip(ChipLabel("☐ 待办", todos), MarkFilter.Todo, store, accent));
+    }
+
+    private static string ChipLabel(string label, int count) => count > 0 ? label + " " + count : label;
+
+    /// <summary>状态筛选 chip（收藏 / 待办）：开关式，可与类型、来源、时间叠加。</summary>
+    private static UIElement MakeMarkChip(string label, MarkFilter filter, ClipboardStore store, Color accent)
+    {
+        var active = _markFilter == filter;
+
+        var text = new TextBlock
+        {
+            Text = label,
+            FontSize = 12,
+            FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal,
+            Foreground = active ? new SolidColorBrush(accent) : _themeText ?? SystemColors.ControlTextBrush
+        };
+
+        var chip = new Border
+        {
+            Child = text,
+            Padding = new Thickness(10, 4, 10, 4),
+            Margin = new Thickness(0, 0, 6, 0),
+            CornerRadius = new CornerRadius(10),
+            BorderThickness = new Thickness(1),
+            BorderBrush = active ? new SolidColorBrush(accent) : Brushes.Transparent,
+            Background = active
+                ? new SolidColorBrush(Color.FromArgb(28, accent.R, accent.G, accent.B))
+                : Brushes.Transparent,
+            Cursor = Cursors.Hand
+        };
+
+        chip.MouseLeftButtonUp += (_, _) =>
+        {
+            _markFilter = active ? MarkFilter.None : filter; // 再点一次取消
+            RebuildChips(store, accent);
+            Refresh(store);
+        };
+
+        return chip;
     }
 
     /// <summary>
@@ -557,28 +685,50 @@ internal static class ClipboardPanel
             filter = filter.Length > 0 ? filter + " from:" + _sourceFilter : "from:" + _sourceFilter;
         }
 
-        var matched = store.Search(filter.Length == 0 ? null : filter, MaxRows, IsMatch);
+        // 标记视图：点筛选行的 ★ 收藏 / ☐ 待办 进入；主界面同样会显示被标记的条目
+        var marksView = _markFilter != MarkFilter.None;
+        var todoView = _markFilter == MarkFilter.Todo;
+        var matched = marksView
+            ? store.Snapshot()
+            : store.Search(filter.Length == 0 ? null : filter, MaxRows, IsMatch);
 
-        // 一次遍历同时完成：类型过滤、固定/普通拆组、渲染签名。
-        // 签名与上次一致就不动视觉树（输错又删掉、Ctrl+P 后同序等场景），整棵子树重建就此免掉。
-        var favorites = new List<ClipboardIndexEntry>();
+        // 一次遍历同时完成：类型过滤、分组、渲染签名。
+        // 签名与上次一致就不动视觉树（输错又删掉等场景），整棵子树重建就此免掉。
         var todos = new List<ClipboardIndexEntry>();
+        var favorites = new List<ClipboardIndexEntry>();
         var pinned = new List<ClipboardIndexEntry>();
         var normal = new List<ClipboardIndexEntry>();
+        var archived = new List<ClipboardIndexEntry>();
         var signature = new StringBuilder(512);
         var visible = 0;
 
         foreach (var entry in matched)
         {
+            if (marksView)
+            {
+                // 标记页：只收当前筛选对应的标记
+                var wanted = todoView ? entry.IsTodo : entry.IsFavorite;
+                if (!wanted)
+                {
+                    continue;
+                }
+            }
+            else if (entry.IsTodoArchived)
+            {
+                // 已完成的待办不在主界面添噪音，只在"待办"视图的"已归档"里看
+                continue;
+            }
+
+            // 类型筛选在两个视图里都生效（可以只看"图片收藏"）
             if (!PassesTypeFilter(entry))
             {
                 continue;
             }
 
-            // 时间筛选（区间）：只作用于普通条目 —— 收藏和固定组始终可见
+            // 时间筛选（区间）：对收藏 / 待办 / 置顶不生效 —— 重要的东西不该被"看今天"筛没了
+            var timeExempt = entry.IsFavorite || entry.IsTodo || entry.IsPinned;
             if (_timeFilterFrom is not null
-                && !entry.IsFavorite
-                && !entry.IsPinned
+                && !timeExempt
                 && (entry.CreatedAt < _timeFilterFrom.Value
                     || entry.CreatedAt > (_timeFilterTo ?? DateTime.MaxValue)))
             {
@@ -586,17 +736,85 @@ internal static class ClipboardPanel
             }
 
             visible++;
-            signature.Append(entry.Id).Append(',');
-            (entry.IsTodo ? todos : entry.IsFavorite ? favorites : entry.IsPinned ? pinned : normal).Add(entry);
+
+            // 签名带上标记位：只改标记（Ctrl+F / Ctrl+T / Ctrl+P）时列表顺序可能没变，
+            // 不带标记位就会因为"签名没变"跳过重建，行首的 ★/☐ 要等下一次刷新才出现
+            signature.Append(entry.Id)
+                .Append(entry.IsFavorite ? 'F' : '-')
+                .Append(entry.IsTodo ? 'T' : '-')
+                .Append(entry.IsPinned ? 'P' : '-')
+                .Append(entry.IsTodoArchived ? 'A' : '-')
+                .Append(',');
+
+            if (marksView)
+            {
+                if (!todoView)
+                {
+                    favorites.Add(entry);
+                }
+                else if (entry.IsTodoArchived)
+                {
+                    archived.Add(entry);
+                }
+                else
+                {
+                    todos.Add(entry);
+                }
+
+                continue;
+            }
+
+            // 主界面：被标记的内容也留在列表里（归到顶部固定分组），不再"收藏完就消失"
+            if (entry.IsTodo)
+            {
+                todos.Add(entry);
+            }
+            else if (entry.IsFavorite)
+            {
+                favorites.Add(entry);
+            }
+            else if (entry.IsPinned)
+            {
+                pinned.Add(entry);
+            }
+            else
+            {
+                normal.Add(entry);
+            }
         }
 
+        // 待办按紧急度排序（有提醒的按时间升序）—— 主界面的待办分组与待办视图一致
+        SortTodos(todos);
+
+        // 标记视图里类型/来源/搜索都不参与筛选 —— 一并置灰，行为与视觉一致
+        if (_search is not null)
+        {
+            _search.IsEnabled = !marksView;
+        }
+
+        if (_sourceCombo is not null)
+        {
+            _sourceCombo.IsEnabled = !marksView;
+        }
+
+        // 自检日志：标记条目为什么没出现在主界面，看这一行就能定位（类型筛选/时间筛选/标记计数）
+        ClipboardListener.Log(
+            "panel refresh: total=" + store.Count + " type=" + _typeFilter + " mark=" + _markFilter
+                + " time=" + (_timeFilterFrom is null ? "off" : "on")
+                + " source=" + (_sourceFilter ?? "-")
+                + " visible=" + visible + " pinned=" + pinned.Count + " archived=" + archived.Count
+                + " normal=" + normal.Count
+                + " marksInStore=" + CountMarked(store),
+            LogLevel.Debug);
+
         signature.Append('|').Append(visible).Append('|').Append(store.PinnedCount);
+        signature.Append('|').Append((int)_markFilter);
         signature.Append('|').Append(_timeFilterFrom?.Ticks ?? 0).Append('-').Append(_timeFilterTo?.Ticks ?? 0);
         var sign = signature.ToString();
 
         if (sign == _lastSignature && _list.Items.Count > 0)
         {
-            UpdateHint(store);
+            UpdateHint(store, visible);
             return;
         }
 
@@ -609,10 +827,47 @@ internal static class ClipboardPanel
             Rows.Clear();
             _highlighted = null;
 
-            // 分组顺序：待办（最紧急）→ 收藏（永久保留）→ 固定（仅排序）→ 时间分组
+            if (marksView)
+            {
+                // 收藏视图：一条"收藏"段；待办视图：待办 + 已归档 两段
+                if (!todoView)
+                {
+                    if (favorites.Count > 0)
+                    {
+                        _list.Items.Add(MakeGroupHeader("收藏", favorites.Count, store, clickable: false));
+                        foreach (var entry in favorites)
+                        {
+                            AddRow(entry, store);
+                        }
+                    }
+                }
+                else
+                {
+                    if (todos.Count > 0)
+                    {
+                        _list.Items.Add(MakeGroupHeader("待办", todos.Count, store, clickable: false));
+                        foreach (var entry in todos)
+                        {
+                            AddRow(entry, store);
+                        }
+                    }
+
+                    if (archived.Count > 0)
+                    {
+                        _list.Items.Add(MakeGroupHeader("已归档", archived.Count, store, clickable: false));
+                        foreach (var entry in archived)
+                        {
+                            AddRow(entry, store);
+                        }
+                    }
+                }
+            }
+            else
+            {
+            // 收藏 / 待办 / 置顶 各自成组放最上面：标记过的条目仍然留在主界面
+            //（旧行为是"收藏后从主列表消失"，只会让人以为东西丢了），时间轴里不重复出现
             if (todos.Count > 0)
             {
-                SortTodos(todos);
                 _list.Items.Add(MakeGroupHeader("待办", todos.Count, store, clickable: false));
                 foreach (var entry in todos)
                 {
@@ -629,10 +884,9 @@ internal static class ClipboardPanel
                 }
             }
 
-            // 固定的条目单列一组放最上面 —— 和主流工具的"收藏条"一致，常用内容不用滚
             if (pinned.Count > 0)
             {
-                _list.Items.Add(MakeGroupHeader("已固定", pinned.Count, store, clickable: false));
+                _list.Items.Add(MakeGroupHeader("置顶", pinned.Count, store, clickable: false));
                 foreach (var entry in pinned)
                 {
                     AddRow(entry, store);
@@ -658,6 +912,7 @@ internal static class ClipboardPanel
 
                 AddRow(entry, store);
             }
+            }
 
             if (Rows.Count > 0)
             {
@@ -670,10 +925,14 @@ internal static class ClipboardPanel
         }
 
         UpdateAccents();
-        UpdateHint(store);
+        UpdateHint(store, visible);
     }
 
-    private static void UpdateHint(ClipboardStore store)
+    /// <summary>
+    /// 底部提示：显示多少条 / 库里共多少条 + 收藏·待办·置顶计数。
+    /// visible 传 -1 表示"用当前已渲染的行数"（时间线重开时刷提示用）。
+    /// </summary>
+    private static void UpdateHint(ClipboardStore store, int visible = -1)
     {
         if (_hint is null)
         {
@@ -681,27 +940,45 @@ internal static class ClipboardPanel
         }
 
         var favorites = 0;
+        var todos = 0;
         foreach (var entry in store.Snapshot())
         {
             if (entry.IsFavorite)
             {
                 favorites++;
             }
+
+            if (entry.IsTodo && !entry.IsTodoArchived)
+            {
+                todos++;
+            }
         }
 
-        var badges = string.Empty;
-        if (favorites > 0 || store.PinnedCount > 0)
+        var parts = new List<string>(3);
+        if (favorites > 0)
         {
-            badges = "（"
-                + (favorites > 0 ? "收藏 " + favorites : string.Empty)
-                + (favorites > 0 && store.PinnedCount > 0 ? " · " : string.Empty)
-                + (store.PinnedCount > 0 ? "固定 " + store.PinnedCount : string.Empty)
-                + "）";
+            parts.Add("收藏 " + favorites);
         }
 
-        _hint.Text = (_timeFilterLabel is null ? string.Empty : "已筛选 " + _timeFilterLabel + " · ")
-            + "共 " + store.Count + " 条" + badges
-            + " · ↑↓ 选择 · Enter 粘贴 · Ctrl+F 收藏 · Ctrl+P 固定 · Ctrl+Del 删除";
+        if (todos > 0)
+        {
+            parts.Add("待办 " + todos);
+        }
+
+        if (store.PinnedCount > 0)
+        {
+            parts.Add("置顶 " + store.PinnedCount);
+        }
+
+        var badges = parts.Count > 0 ? "（" + string.Join(" · ", parts) + "）" : string.Empty;
+        var markings = _markFilter == MarkFilter.Favorite
+            ? "【收藏】"
+            : _markFilter == MarkFilter.Todo ? "【待办】" : string.Empty;
+
+        // 筛选时仍写"共 N 条"会让人以为筛选没生效，所以直接说"显示 X / 共 N 条"
+        _hint.Text = markings
+            + (_timeFilterLabel is null ? string.Empty : "已筛选 " + _timeFilterLabel + " · ")
+            + "显示 " + (visible >= 0 ? visible : Rows.Count) + " / 共 " + store.Count + " 条" + badges;
     }
 
     private static void AddRow(ClipboardIndexEntry entry, ClipboardStore store)
@@ -711,9 +988,9 @@ internal static class ClipboardPanel
             return;
         }
 
-        var (item, accent, thumbnail) = MakeRow(entry, store);
+        var (item, thumbnail) = MakeRow(entry, store);
         _list.Items.Add(item);
-        Rows.Add(new Row { Entry = entry, Container = item, Accent = accent, Thumbnail = thumbnail });
+        Rows.Add(new Row { Entry = entry, Container = item, Thumbnail = thumbnail });
 
         if (entry.Kind == ClipboardEntryKind.Image)
         {
@@ -1096,23 +1373,26 @@ internal static class ClipboardPanel
         _timelineHighlight = -1;
     }
 
-    private static (ListBoxItem Item, Border Accent, Image? Thumbnail) MakeRow(ClipboardIndexEntry entry, ClipboardStore store)
+    private static (ListBoxItem Item, Image? Thumbnail) MakeRow(ClipboardIndexEntry entry, ClipboardStore store)
     {
-        var accent = new Border
-        {
-            Width = 3,
-            CornerRadius = new CornerRadius(2),
-            Background = Brushes.Transparent,
-            Margin = new Thickness(0, 0, 8, 0)
-        };
-
+        // 这里**绝对不要**再放"选中行强调竖条"之类的固定宽度元素：
+        // 默认 HorizontalAlignment=Stretch 时，带固定 Width 的元素会在它所在的 Auto 列里被
+        // 水平居中，而 Auto 列的宽度是"整条文本的期望宽度"，于是 3px 的条子会跑到行中间，
+        // 看起来就是一条莫名其妙的绿线（用户已经反馈过一次"不知道这是什么、很影响"）。
+        // 选中反馈交给宿主 ListBoxItem 自带的行高亮 + 下面 UpdateAccents 的字重变化。
         var preview = new TextBlock
         {
-            Text = (entry.IsFavorite ? "★ " : "") + entry.Preview,
+            Text = entry.Preview,
             FontSize = 13,
             TextTrimming = TextTrimming.CharacterEllipsis,
             TextWrapping = TextWrapping.NoWrap
         };
+
+        if (entry.IsTodoArchived)
+        {
+            preview.TextDecorations = TextDecorations.Strikethrough;
+            preview.Opacity = 0.55;
+        }
 
         var meta = new TextBlock
         {
@@ -1127,10 +1407,41 @@ internal static class ClipboardPanel
         textColumn.Children.Add(preview);
         textColumn.Children.Add(meta);
 
+        // 行首标记：★ 只作展示；☐ 是可点的小热区（点击 = 归档 / 取消归档）
+        var markers = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Top
+        };
+
+        if (entry.IsFavorite)
+        {
+            markers.Children.Add(new TextBlock
+            {
+                Text = "★",
+                FontSize = 13,
+                Margin = new Thickness(0, 0, 4, 0),
+                Foreground = _accentBrush
+            });
+        }
+
+        if (entry.IsTodo)
+        {
+            markers.Children.Add(MakeTodoBox(entry, store));
+        }
+
+        // 列布局：0 = 行首标记（没标记就不占列）｜1 = 图片缩略图｜末列（星号）= 文字。
+        // 文字必须待在星号列，TextTrimming 才会按可用宽度截断；早先把 rowLayout 直接塞进
+        // Auto 列（Grid.SetColumn 设的是它的子元素，不起作用），文本于是被撑到"整条文本的
+        // 期望宽度"再裁掉，图片行的缩略图还会被挤到文字右边。
         var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        Grid.SetColumn(accent, 0);
-        grid.Children.Add(accent);
+
+        if (markers.Children.Count > 0)
+        {
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Grid.SetColumn(markers, grid.ColumnDefinitions.Count - 1);
+            grid.Children.Add(markers);
+        }
 
         Image? thumbnail = null;
         if (entry.Kind == ClipboardEntryKind.Image)
@@ -1147,13 +1458,22 @@ internal static class ClipboardPanel
             };
 
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            Grid.SetColumn(thumbnail, 1);
+            Grid.SetColumn(thumbnail, grid.ColumnDefinitions.Count - 1);
             grid.Children.Add(thumbnail);
         }
 
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         Grid.SetColumn(textColumn, grid.ColumnDefinitions.Count - 1);
         grid.Children.Add(textColumn);
+
+        // 刚归档的那一行：文字淡下去作为反馈（不再画横杠 —— 那也是一条绿线）
+        if (_justArchivedId == entry.Id)
+        {
+            _justArchivedId = 0;
+            var fade = new System.Windows.Media.Animation.DoubleAnimation(
+                1.0, 0.55, TimeSpan.FromMilliseconds(240));
+            preview.BeginAnimation(UIElement.OpacityProperty, fade);
+        }
 
         var item = new ListBoxItem
         {
@@ -1166,7 +1486,7 @@ internal static class ClipboardPanel
         AttachHoverFlyout(item, entry, store);
         item.ContextMenu = BuildRowMenu(entry, store);
 
-        return (item, accent, thumbnail);
+        return (item, thumbnail);
     }
 
     /// <summary>
@@ -1238,8 +1558,8 @@ internal static class ClipboardPanel
     }
 
     /// <summary>
-    /// 只更新"旧选中"和"新选中"两行 —— 之前每次选择都遍历全部行并 new 一遍 SolidColorBrush，
-    /// 150 行就是 300 次分配，选择时会有可感的毛刺。
+    /// 只动"旧选中"和"新选中"两行：选中反馈 = 宿主自带的行高亮 + 字重 SemiBold。
+    /// **不再画任何强调色元素**（那条 3px 竖条会被布局居中到行中间，正是用户反馈的绿线）。
     /// </summary>
     private static void UpdateAccents()
     {
@@ -1252,28 +1572,12 @@ internal static class ClipboardPanel
 
         if (_highlighted is not null && !ReferenceEquals(_highlighted, selected))
         {
-            foreach (var row in Rows)
-            {
-                if (ReferenceEquals(row.Container, _highlighted))
-                {
-                    row.Accent.Background = Brushes.Transparent;
-                    _highlighted.FontWeight = FontWeights.Normal;
-                    break;
-                }
-            }
+            _highlighted.FontWeight = FontWeights.Normal;
         }
 
         if (selected is not null)
         {
-            foreach (var row in Rows)
-            {
-                if (ReferenceEquals(row.Container, selected))
-                {
-                    row.Accent.Background = _accentBrush;
-                    selected.FontWeight = FontWeights.SemiBold;
-                    break;
-                }
-            }
+            selected.FontWeight = FontWeights.SemiBold;
         }
 
         _highlighted = selected;
@@ -1644,6 +1948,20 @@ internal static class ClipboardPanel
             _closeButton.Foreground = textBrush;
             _closeButton.Background = surface; // 模板用 TemplateBinding Background，不赋值就是默认灰底
         }
+
+        if (_notifyButton is not null)
+        {
+            _notifyButton.Template = (ControlTemplate)System.Windows.Markup.XamlReader.Parse(CloseButtonTemplateXaml);
+            _notifyButton.Foreground = textBrush;
+            _notifyButton.Background = surface;
+        }
+
+        // 主题采样发生在 Loaded 之后（要等宿主把搜索框画出来才能采到真实配色），
+        // 晚于首次 RebuildChips，所以这里再建一次 chip：深色主题下 chip 文字才会是亮色。
+        if (ClipboardHistoryPlugin.Store is { } store && _accentBrush is SolidColorBrush accentBrush)
+        {
+            RebuildChips(store, accentBrush.Color);
+        }
     }
 
     private static Border? FindFirstBorder(DependencyObject root)
@@ -1757,6 +2075,259 @@ internal static class ClipboardPanel
         </ControlTemplate>
         """;
 
+    /// <summary>
+    /// 通知记录：浮窗 8 秒就消失，这里让用户事后还能看到"刚才提醒了什么"
+    /// （用户明确反馈："如果他消失了，我没有任何地方能看到他的通知"）。
+    /// </summary>
+    private static void OpenNotificationLog(ClipboardStore store)
+    {
+        CloseNotificationLog();
+        CloseTimeline();
+        ClipboardWhenPicker.Close();
+
+        var all = ClipboardNotificationLog.Snapshot();
+        var today = DateTime.Today;
+        var entries = _notifyTodayOnly
+            ? all.Where(item => new DateTime(item.At).Date == today).ToList()
+            : all;
+
+        var root = new StackPanel { MinWidth = 340 };
+
+        // 今日 / 全部 切换（默认今日，一眼看到今天有多少条）
+        var scopeRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(8, 2, 8, 4)
+        };
+
+        scopeRow.Children.Add(ScopeChip("今日 " + all.Count(i => new DateTime(i.At).Date == today), _notifyTodayOnly, () =>
+        {
+            _notifyTodayOnly = true;
+            CloseNotificationLog();
+            OpenNotificationLog(store);
+        }));
+
+        scopeRow.Children.Add(ScopeChip("全部 " + all.Count, !_notifyTodayOnly, () =>
+        {
+            _notifyTodayOnly = false;
+            CloseNotificationLog();
+            OpenNotificationLog(store);
+        }));
+
+        root.Children.Add(scopeRow);
+
+        root.Children.Add(new TextBlock
+        {
+            Text = (_notifyTodayOnly ? "今日通知" : "全部通知") + "（" + entries.Count + " 条）",
+            FontSize = 11.5,
+            FontWeight = FontWeights.SemiBold,
+            Opacity = 0.6,
+            Margin = new Thickness(10, 2, 10, 6),
+            Foreground = ThemeText
+        });
+
+        if (entries.Count == 0)
+        {
+            root.Children.Add(new TextBlock
+            {
+                Text = "暂无通知。待办提醒或置顶到期后会记录在这里。",
+                FontSize = 12,
+                Opacity = 0.6,
+                Margin = new Thickness(10, 0, 10, 8),
+                TextWrapping = TextWrapping.Wrap,
+                Foreground = ThemeText
+            });
+        }
+
+        foreach (var item in entries)
+        {
+            var at = new DateTime(item.At);
+            var label = (item.Kind == (int)ClipboardDueKind.Remind ? "待办提醒" : "置顶到期")
+                + " · " + at.ToString("MM-dd HH:mm");
+
+            var row = new Border
+            {
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(10, 6, 10, 6),
+                Margin = new Thickness(2, 1, 2, 1),
+                Background = Brushes.Transparent,
+                Cursor = Cursors.Hand
+            };
+
+            var stack = new StackPanel();
+            stack.Children.Add(new TextBlock
+            {
+                Text = label,
+                FontSize = 11,
+                Opacity = 0.6,
+                Foreground = ThemeText
+            });
+            stack.Children.Add(new TextBlock
+            {
+                Text = item.Preview,
+                FontSize = 12.5,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Foreground = ThemeText
+            });
+
+            row.Child = stack;
+            row.MouseEnter += (_, _) => row.Background = ThemeHover;
+            row.MouseLeave += (_, _) => row.Background = Brushes.Transparent;
+
+            var entryId = item.EntryId;
+            row.MouseLeftButtonUp += (_, e) =>
+            {
+                e.Handled = true;
+                CloseNotificationLog();
+                SelectEntryById(entryId, store);
+            };
+
+            root.Children.Add(row);
+        }
+
+        var surface = new Border
+        {
+            Background = ThemeSurface,
+            BorderBrush = ThemeBorder,
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(5),
+            Child = new ScrollViewer
+            {
+                MaxHeight = 380,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Content = root
+            }
+        };
+
+        _notifyPopup = new Popup
+        {
+            PlacementTarget = (FrameworkElement?)_notifyButton ?? (FrameworkElement?)_list ?? _window!,
+            Placement = PlacementMode.Top,
+            VerticalOffset = -6,
+            StaysOpen = true,
+            AllowsTransparency = true,
+            Child = surface
+        };
+
+        _notifyPopup.IsOpen = true;
+    }
+
+    /// <summary>通知面板的"今日 / 全部"切换 chip。</summary>
+    private static UIElement ScopeChip(string label, bool active, Action onClick)
+    {
+        var chip = new Border
+        {
+            Padding = new Thickness(10, 4, 10, 4),
+            Margin = new Thickness(0, 0, 6, 0),
+            CornerRadius = new CornerRadius(10),
+            BorderThickness = new Thickness(1),
+            BorderBrush = active ? _accentBrush : Brushes.Transparent,
+            Background = active ? ThemeSelected : Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            Child = new TextBlock
+            {
+                Text = label,
+                FontSize = 12,
+                FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal,
+                Foreground = active ? _accentBrush : ThemeText
+            }
+        };
+
+        chip.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true;
+            onClick();
+        };
+
+        return chip;
+    }
+
+    private static void CloseNotificationLog()
+    {
+        if (_notifyPopup is not null)
+        {
+            _notifyPopup.IsOpen = false;
+        }
+
+        _notifyPopup = null;
+    }
+
+    /// <summary>选中指定条目；当前筛选看不到它时先清空筛选再选中。</summary>
+    private static void SelectEntryById(long entryId, ClipboardStore store)
+    {
+        if (SelectEntryCore(entryId))
+        {
+            return;
+        }
+
+        _markFilter = MarkFilter.None;
+        _typeFilter = ClipType.All;
+        _timeFilterFrom = null;
+        _timeFilterTo = null;
+        _timeFilterLabel = null;
+        _sourceFilter = null;
+        Refresh(store);
+        SelectEntryCore(entryId);
+    }
+
+    private static bool SelectEntryCore(long entryId)
+    {
+        foreach (var row in Rows)
+        {
+            if (row.Entry.Id != entryId)
+            {
+                continue;
+            }
+
+            if (_list is not null)
+            {
+                _list.SelectedItem = row.Container;
+                row.Container.BringIntoView();
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 待办的小方框：**可点击**，但热区只包住字形本身（比整行小得多，不会误触）。
+    /// 点击 = 归档（打勾），再点 = 取消归档 —— 与用户确认的"打勾等于自动归档"一致。
+    /// </summary>
+    private static UIElement MakeTodoBox(ClipboardIndexEntry entry, ClipboardStore store)
+    {
+        var box = new Border
+        {
+            Padding = new Thickness(1, 0, 4, 0), // 热区只比字形大一点点
+            Margin = new Thickness(0),
+            CornerRadius = new CornerRadius(4),
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            VerticalAlignment = VerticalAlignment.Top,
+            Child = new TextBlock
+            {
+                Text = entry.IsTodoArchived ? "✓" : "☐",
+                FontSize = 13,
+                Foreground = _accentBrush
+            }
+        };
+
+        box.MouseEnter += (_, _) => box.Background = ThemeHover;
+        box.MouseLeave += (_, _) => box.Background = Brushes.Transparent;
+        box.MouseLeftButtonUp += (_, e) =>
+        {
+            e.Handled = true; // 关键：不让点击冒泡成"选中/粘贴"
+            _justArchivedId = entry.Id;
+            store.ToggleTodoArchive(entry.Id);
+            ClipboardHistoryPlugin.Reminders?.Arm();
+            Refresh(store);
+        };
+
+        return box;
+    }
+
     private static void UpdateWatermark()
     {
         if (_watermark is not null && _search is not null)
@@ -1774,8 +2345,9 @@ internal static class ClipboardPanel
             return;
         }
 
-        // 直接按 Rows 索引移动，天然跳过分组标题
-        var current = 0;
+        // 直接按 Rows 索引移动，天然跳过分组标题；当前选中不是条目行（比如选了分组头）
+        // 时按 -1 处理，这样 ↓ 落到第一条、↑ 停在第一条，而不是从第二条开始
+        var current = -1;
         for (var i = 0; i < Rows.Count; i++)
         {
             if (ReferenceEquals(Rows[i].Container, _list.SelectedItem))
@@ -2023,6 +2595,53 @@ internal static class ClipboardPanel
         Refresh(store);
     }
 
+    /// <summary>打开时间选择器（置顶时限 / 提醒时间），锚定在该条目行上。</summary>
+    private static void OpenWhenPicker(ClipboardIndexEntry entry, ClipboardStore store, bool reminder)
+    {
+        FrameworkElement anchor = (FrameworkElement?)_list ?? _window!;
+        foreach (var row in Rows)
+        {
+            if (row.Entry.Id == entry.Id)
+            {
+                anchor = row.Container;
+                break;
+            }
+        }
+
+        var current = reminder ? entry.RemindAt : entry.PinnedUntil;
+
+        // 置顶场景补一个"永久"选项：否则空值只能表示"清除"，没有表达"永久置顶"的方式
+        // （用 DateTime.MaxValue 作哨兵，与"清除 = null"区分开）
+        var extras = reminder
+            ? null
+            : new (string, Func<DateTime?>)[]
+            {
+                ("永久置顶（无期限）", () => DateTime.MaxValue)
+            };
+
+        ClipboardWhenPicker.Open(
+            anchor,
+            reminder ? "什么时候提醒？" : "置顶到什么时候？",
+            reminder ? "取消提醒" : "取消置顶",
+            current,
+            value =>
+            {
+                if (reminder)
+                {
+                    ApplyReminder(store, entry, value);
+                }
+                else if (value is null)
+                {
+                    ApplyUnpin(store, entry);
+                }
+                else
+                {
+                    ApplyPin(store, entry, value == DateTime.MaxValue ? null : value);
+                }
+            },
+            extras);
+    }
+
     private static void ApplyPin(ClipboardStore store, ClipboardIndexEntry entry, DateTime? until)
     {
         store.SetPin(entry.Id, until);
@@ -2109,28 +2728,33 @@ internal static class ClipboardPanel
             Refresh(store);
         }));
 
-        var pin = new MenuItem { Header = "置顶" };
-        pin.Items.Add(NewMenuItem("永久", () => ApplyPin(store, entry, null)));
-        pin.Items.Add(NewMenuItem("10 分钟", () => ApplyPin(store, entry, DateTime.Now.AddMinutes(10))));
-        pin.Items.Add(NewMenuItem("1 小时", () => ApplyPin(store, entry, DateTime.Now.AddHours(1))));
-        pin.Items.Add(NewMenuItem("今天 18:00", () => ApplyPin(store, entry, TodayAt(18))));
-        pin.Items.Add(NewMenuItem("明天 9:00", () => ApplyPin(store, entry, DateTime.Today.AddDays(1).AddHours(9))));
-        if (entry.IsPinned)
+        if (entry.IsTodo)
         {
-            pin.Items.Add(new Separator());
-            pin.Items.Add(NewMenuItem("取消置顶", () => ApplyUnpin(store, entry)));
+            // 归档 ≠ 删除：归档只是从"进行中"收起，内容与记录保留，可随时取消归档
+            menu.Items.Add(NewMenuItem(entry.IsTodoArchived ? "取消归档" : "归档（完成）", () =>
+            {
+                store.ToggleTodoArchive(entry.Id);
+                ClipboardHistoryPlugin.Reminders?.Arm();
+                Refresh(store);
+            }));
         }
 
-        menu.Items.Add(pin);
+        // 置顶与提醒共用一个自绘时间选择器（菜单三级子菜单在鼠标移出二级项时会收起，点不到）
+        menu.Items.Add(NewMenuItem(entry.IsPinned ? "修改置顶时限…" : "置顶…", () =>
+            OpenWhenPicker(entry, store, reminder: false)));
 
-        var remind = new MenuItem { Header = "提醒" };
-        remind.Items.Add(NewMenuItem("取消提醒", () => ApplyReminder(store, entry, null)));
-        remind.Items.Add(NewMenuItem("10 分钟后", () => ApplyReminder(store, entry, DateTime.Now.AddMinutes(10))));
-        remind.Items.Add(NewMenuItem("30 分钟后", () => ApplyReminder(store, entry, DateTime.Now.AddMinutes(30))));
-        remind.Items.Add(NewMenuItem("1 小时后", () => ApplyReminder(store, entry, DateTime.Now.AddHours(1))));
-        remind.Items.Add(NewMenuItem("今天 18:00", () => ApplyReminder(store, entry, TodayAt(18))));
-        remind.Items.Add(NewMenuItem("明天 9:00", () => ApplyReminder(store, entry, DateTime.Today.AddDays(1).AddHours(9))));
-        menu.Items.Add(remind);
+        if (entry.IsPinned)
+        {
+            menu.Items.Add(NewMenuItem("取消置顶", () => ApplyUnpin(store, entry)));
+        }
+
+        menu.Items.Add(NewMenuItem(entry.RemindAt is null ? "设置提醒…" : "修改提醒时间…", () =>
+            OpenWhenPicker(entry, store, reminder: true)));
+
+        if (entry.RemindAt is not null)
+        {
+            menu.Items.Add(NewMenuItem("取消提醒", () => ApplyReminder(store, entry, null)));
+        }
 
         menu.Items.Add(new Separator());
         menu.Items.Add(NewMenuItem("删除", () =>
@@ -2184,13 +2808,34 @@ internal static class ClipboardPanel
         }
     }
 
-    /// <summary>提醒/到期导致数据变化时刷新已打开的面板。</summary>
+    /// <summary>提醒/到期导致数据变化时刷新已打开的面板，并同步"通知 (N)"计数。</summary>
     internal static void NotifyStoreChanged(ClipboardStore store)
     {
+        if (_notifyButton is not null)
+        {
+            _notifyButton.Content = "通知 (今日 " + ClipboardNotificationLog.TodayCount
+                + " / 共 " + ClipboardNotificationLog.Count + ")";
+        }
+
         if (_list is not null && _window is { IsVisible: true })
         {
             Refresh(store);
         }
+    }
+
+    /// <summary>自检用：库里被标记（收藏或待办）的条目数。</summary>
+    private static int CountMarked(ClipboardStore store)
+    {
+        var count = 0;
+        foreach (var entry in store.Snapshot())
+        {
+            if (entry.IsFavorite || entry.IsTodo)
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private static bool PassesTypeFilter(ClipboardIndexEntry entry)

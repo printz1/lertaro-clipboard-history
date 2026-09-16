@@ -23,6 +23,8 @@ internal static class ClipboardConfigSchema
     internal const string KeyHoverPreview = "HoverPreview";
     internal const string KeyReminderSound = "ReminderSound";
     internal const string KeySortTodosByDue = "SortTodosByDue";
+    internal const string KeyTodoAutoPin = "TodoAutoPin";
+    internal const string KeyWhenQuickOptions = "WhenQuickOptions";
 
     internal static PluginConfigSchema Build(
         ClipboardSettings current,
@@ -142,7 +144,25 @@ internal static class ClipboardConfigSchema
                     ConfigFieldType.Boolean,
                     current.SortTodosByDue,
                     () => staged.SortTodosByDue,
-                    value => staged.SortTodosByDue = value is bool b && b)
+                    value => staged.SortTodosByDue = value is bool b && b),
+
+                NewField(
+                    KeyTodoAutoPin,
+                    "ClipboardHistory_Config_TodoAutoPin_Label",
+                    "ClipboardHistory_Config_TodoAutoPin_Desc",
+                    ConfigFieldType.Boolean,
+                    current.TodoAutoPin,
+                    () => staged.TodoAutoPin,
+                    value => staged.TodoAutoPin = value is bool b && b),
+
+                NewField(
+                    KeyWhenQuickOptions,
+                    "ClipboardHistory_Config_WhenQuickOptions_Label",
+                    "ClipboardHistory_Config_WhenQuickOptions_Desc",
+                    ConfigFieldType.StringList,
+                    current.WhenQuickOptions,
+                    () => staged.WhenQuickOptions,
+                    value => staged.WhenQuickOptions = value as List<string> ?? ClipboardSettings.NormalizeQuickOptions(value as IEnumerable<string>))
             ],
             OnSave = onSave,
             OnRollback = onRollback

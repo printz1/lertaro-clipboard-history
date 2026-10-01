@@ -47,7 +47,10 @@ public sealed class ClipboardHistoryPlugin : IPlugin, IInstantResultProvider, IA
         {
             if (_reminders is null && _store is not null)
             {
-                var dispatcher = System.Windows.Application.Current?.Dispatcher;
+                // 优先宿主 UI 线程；hook 进程没有 Application.Current，
+                // 兜底到插件自管的 STA UI 线程（ClipboardUi），否则提醒永远不触发
+                var dispatcher = System.Windows.Application.Current?.Dispatcher
+                    ?? ClipboardUi.EnsureStarted();
                 if (dispatcher is null)
                 {
                     return null;
@@ -229,11 +232,20 @@ public sealed class ClipboardHistoryPlugin : IPlugin, IInstantResultProvider, IA
                     return;
                 }
 
+                // 5.8 双进程抢热键根治：App 和 hook 都会实例化本插件并尝试注册 Win+V，
+                // 而 RegisterHotKey 全局唯一、先到先得 —— hook 抢到时面板在无宿主环境里
+                // 弹不出来（PluginWindow XAML 的 ResourceDictionary.Source 解析失败，
+                // XamlParseException，实测 hook.log 多次 Error），表现为"Win+V 失效"。
+                // 热键归 App：App 有完整宿主环境（Application.Current/主题/logger），
+                // 面板永远正常；hook 进程判定 = Application.Current 为空，只保留监听本职。
+                var isHookProcess = System.Windows.Application.Current is null;
+                var hotkeyText = isHookProcess ? null : ClipboardSettings.Current.Hotkey;
+
                 var listener = new ClipboardListener(
                     _store,
                     () => ClipboardSettings.Current.PauseCapture,
-                    ClipboardSettings.Current.Hotkey,
-                    () => ClipboardHotkeyAction.Invoke("global hotkey"),
+                    hotkeyText,
+                    isHookProcess ? null : () => ClipboardHotkeyAction.Invoke("global hotkey"),
                     initSummary);
 
                 if (listener.Start(TimeSpan.FromMilliseconds(750)))
@@ -249,6 +261,18 @@ public sealed class ClipboardHistoryPlugin : IPlugin, IInstantResultProvider, IA
                             "hotkey '" + ClipboardSettings.Current.Hotkey + "' is not active; pick another combination in the plugin settings",
                             LogLevel.Warn);
                     }
+
+                    // ctor 期的日志会被丢（宿主 logger 未接线），热键注册结果延迟到
+                    // 运行期再报一次 —— 两个进程各报一条，随时可从日志确认热键归属
+                    var listenerRef = listener;
+                    var reportedHotkey = hotkeyText ?? "(none, hook process)";
+                    new System.Threading.Timer(
+                        _ => ClipboardListener.Log(
+                            "hotkey status: " + reportedHotkey + " registered=" + listenerRef.HotkeyRegistered,
+                            LogLevel.Info),
+                        null,
+                        3000,
+                        System.Threading.Timeout.Infinite);
                 }
                 else
                 {

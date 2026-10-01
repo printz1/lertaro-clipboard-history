@@ -74,7 +74,13 @@ internal sealed class ClipboardListener : IDisposable
     /// <summary>收到的 WM_CLIPBOARDUPDATE 次数（诊断链路断点用）。</summary>
     internal int NotificationCount;
 
-    /// <summary>真正进入读取流程的次数。</summary>
+    /// <summary>补偿重试的退避间隔；争用通常在几十毫秒内解除，150ms x 3 次足够覆盖。</summary>
+    private const int CaptureRetryDelayMs = 150;
+
+    /// <summary>TryCaptureImage 里 ReadImage 是否因 OpenClipboard 失败（单读者线程，无并发写）。</summary>
+    private bool _imageOpenFailed;
+
+    /// <summary>真正进入读取流程的次数（诊断链路断点用）。</summary>
     internal int ReadCount;
 
     /// <summary>读了但没拿到文本的次数（无文本格式 / 剪贴板被占用 / 超长被丢）。</summary>
@@ -298,32 +304,61 @@ internal sealed class ClipboardListener : IDisposable
                 break;
             }
 
-            try
+            // 争用补偿：OpenClipboard 失败（另一进程的监听器/延迟渲染应用持锁）时
+            // 退避重试。剪贴板只保留最新内容，重试期间被更新的复制覆盖是可接受的；
+            // 不重试则这条内容永久丢失 —— 两害取其轻。
+            var handled = false;
+
+            for (var attempt = 0; attempt < 4 && !_stopping; attempt++)
             {
-                Capture();
-            }
-            catch (Exception ex)
-            {
-                Log("capture failed: " + ex.Message, LogLevel.Warn);
+                try
+                {
+                    handled = Capture();
+                }
+                catch (Exception ex)
+                {
+                    Log("capture failed: " + ex.Message, LogLevel.Warn);
+                    handled = true; // 异常不重试，避免把同一个坏内容打四遍日志
+                }
+
+                if (handled)
+                {
+                    break;
+                }
+
+                Thread.Sleep(CaptureRetryDelayMs);
             }
         }
     }
 
-    private void Capture()
+    /// <summary>
+    /// 执行一次采集。返回 false 表示"这次剪贴板变化还没被处理"——
+    /// 典型场景是 OpenClipboard 争用失败，调用方可退避后重试；
+    /// 正常捕获 / 敏感内容排除 / 剪贴板本身为空都返回 true。
+    /// </summary>
+    private bool Capture()
     {
+        // 写回窗口期：写回的内容本就来自历史，回采只会制造重复竞争与噪声
+        if (DateTime.UtcNow < ClipboardWriter.SuppressCaptureUntilUtc)
+        {
+            return true;
+        }
+
         if (_isPaused?.Invoke() == true)
         {
-            return;
+            return true;
         }
 
         Interlocked.Increment(ref ReadCount);
+
         var result = ClipboardReader.Read();
+        var textOpenFailed = string.IsNullOrEmpty(result.Text) && !result.IsExcluded && ClipboardReader.LastOpenFailed;
 
         if (result.IsExcluded)
         {
             ExcludedCount++;
             Log("skipped sensitive content (" + result.SkipReason + ")", LogLevel.Debug);
-            return;
+            return true;
         }
 
         var source = TryGetForegroundProcessName();
@@ -336,18 +371,22 @@ internal sealed class ClipboardListener : IDisposable
             {
                 CaptureCount++;
                 LogFirstCapture();
-                return;
+                return true;
             }
 
             if (TryCaptureFiles(source))
             {
                 CaptureCount++;
                 LogFirstCapture();
-                return;
+                return true;
             }
 
             Interlocked.Increment(ref EmptyReadCount);
-            return;
+
+            // 文本与位图读取都因 OpenClipboard 失败 => 大概率是暂时性争用，允许重试。
+            // 文件读取不参与判断：无 CF_HDROP 是常态（纯文本/图片复制），LastOpenFailed
+            // 会被 ReadFiles 的成功打开覆盖，所以各自在读完后立刻快照。
+            return !textOpenFailed && !_imageOpenFailed;
         }
 
         if (_store.Add(text, source))
@@ -357,6 +396,8 @@ internal sealed class ClipboardListener : IDisposable
                 + " (store#" + _store.InstanceId + " entries=" + _store.Count + ")", LogLevel.Debug);
             LogFirstCapture();
         }
+
+        return true;
     }
 
     /// <summary>
@@ -384,6 +425,7 @@ internal sealed class ClipboardListener : IDisposable
         }
 
         var (data, isPng) = ClipboardReader.ReadImage();
+        _imageOpenFailed = data is null && ClipboardReader.LastOpenFailed;
         if (data is null || data.Length == 0)
         {
             return false;

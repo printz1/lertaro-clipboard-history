@@ -17,8 +17,18 @@ internal readonly record struct ClipboardReadResult(string? Text, bool IsExclude
 /// </summary>
 internal static class ClipboardReader
 {
-    private const int OpenRetryCount = 4;
-    private const int OpenRetryDelayMs = 25;
+    // 5.8 起宿主在两个进程里各挂一个监听器，每次剪贴板变化双方都会来抢
+    // OpenClipboard；再叠加延迟渲染应用持锁（最长 30 秒），100ms 的旧窗口
+    // 太窄，抢不到就永久丢条目。放宽到 10 x 40ms（约 0.4 秒），配合
+    // 监听器侧的补偿重试（ClipboardListener.ReaderLoop）兜底。
+    private const int OpenRetryCount = 10;
+    private const int OpenRetryDelayMs = 40;
+
+    /// <summary>
+    /// 最近一次 Read / ReadImage / ReadFiles 是否因 OpenClipboard 失败而空手而归。
+    /// true = 大概率是暂时性争用，监听器可以稍后补偿重试；不区分具体是哪次读。
+    /// </summary>
+    internal static volatile bool LastOpenFailed;
 
     /// <summary>超过这个长度直接丢弃，避免把巨型文本拖进内存和界面。</summary>
     internal const int MaxTextLength = 100_000;
@@ -56,9 +66,12 @@ internal static class ClipboardReader
         {
             if (!NativeMethods.OpenClipboard(IntPtr.Zero))
             {
+                LastOpenFailed = true;
                 Thread.Sleep(OpenRetryDelayMs);
                 continue;
             }
+
+            LastOpenFailed = false;
 
             try
             {
@@ -158,9 +171,12 @@ internal static class ClipboardReader
         {
             if (!NativeMethods.OpenClipboard(IntPtr.Zero))
             {
+                LastOpenFailed = true;
                 Thread.Sleep(OpenRetryDelayMs);
                 continue;
             }
+
+            LastOpenFailed = false;
 
             try
             {
@@ -247,9 +263,12 @@ internal static class ClipboardReader
         {
             if (!NativeMethods.OpenClipboard(IntPtr.Zero))
             {
+                LastOpenFailed = true;
                 Thread.Sleep(OpenRetryDelayMs);
                 continue;
             }
+
+            LastOpenFailed = false;
 
             try
             {

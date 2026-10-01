@@ -1222,4 +1222,140 @@ internal sealed class ClipboardStore
             LogLevel.Info);
         return store;
     }
+
+    /// <summary>
+    /// 把磁盘快照里本进程还没有的条目并入内存（双进程数据兜底）。
+    /// 5.8 起 hook 进程与 App 进程各持一份 store，面板可能由任一进程打开；
+    /// 对方进程捕获、且已落盘的条目，本进程在打开面板时补齐，避免"刚复制的看不到"。
+    /// 已有指纹直接跳过；合并结果**不置 dirty** —— 这些数据本就在磁盘上，
+    /// 不参与两个进程持久化文件的互相覆盖。返回并入的条目数。
+    /// </summary>
+    internal int MergeFromDisk(string? historyPath, string marksPath)
+    {
+        var merged = 0;
+
+        void MergeFile(string? path, bool marksOrigin)
+        {
+            if (path is null || !File.Exists(path))
+            {
+                return;
+            }
+
+            PersistedState? state;
+            try
+            {
+                state = JsonSerializer.Deserialize<PersistedState>(File.ReadAllText(path), PersistOptions);
+            }
+            catch (Exception ex)
+            {
+                ClipboardListener.Log("merge read failed, skipping " + path + ": " + ex.Message, LogLevel.Warn);
+                return;
+            }
+
+            if (state is null || state.E.Count == 0)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                foreach (var item in state.E)
+                {
+                    if (!ulong.TryParse(item.H, out var hash) || _byHash.ContainsKey(hash))
+                    {
+                        continue;
+                    }
+
+                    ClipboardIndexEntry entry;
+                    if (item.K == 0)
+                    {
+                        if (string.IsNullOrEmpty(item.T))
+                        {
+                            continue;
+                        }
+
+                        entry = new ClipboardIndexEntry(_nextId++, item.T, item.S, new DateTime(item.C, DateTimeKind.Local));
+                    }
+                    else if (item.K == 2)
+                    {
+                        if (string.IsNullOrEmpty(item.T))
+                        {
+                            continue;
+                        }
+
+                        var fileCount = item.L > 0 ? (int)item.L : item.T.Split('\n').Length;
+                        entry = new ClipboardIndexEntry(_nextId++, hash, fileCount, item.T, item.S, new DateTime(item.C, DateTimeKind.Local));
+                    }
+                    else
+                    {
+                        if (string.IsNullOrEmpty(item.P) || !File.Exists(item.P))
+                        {
+                            continue; // 图片文件已被外部删除，条目作废
+                        }
+
+                        entry = new ClipboardIndexEntry(
+                            _nextId++, hash, item.W, item.G,
+                            item.L > 0 ? item.L : new FileInfo(item.P).Length,
+                            item.P, item.S, new DateTime(item.C, DateTimeKind.Local));
+                    }
+
+                    entry.IsPinned = item.X;
+                    entry.IsFavorite = item.F;
+                    entry.IsTodo = item.TD;
+                    entry.IsTodoArchived = item.AR;
+                    entry.ArchivedAt = item.AA is { } aa ? new DateTime(aa) : null;
+                    entry.PinnedUntil = item.PU is { } pu ? new DateTime(pu) : null;
+                    entry.RemindAt = item.RA is { } ra ? new DateTime(ra) : null;
+                    entry.MarksOnly = marksOrigin;
+                    if (entry.IsPinned)
+                    {
+                        _pinnedCount++;
+                    }
+
+                    // 快照按新→旧存，_index 也是新→旧；按 CreatedAt 插到正确位置，
+                    // 保证合并后时间线顺序仍然成立（对方进程可能补进很新的条目）
+                    var pos = 0;
+                    while (pos < _index.Count && _index[pos].CreatedAt >= entry.CreatedAt)
+                    {
+                        pos++;
+                    }
+
+                    _index.Insert(pos, entry);
+                    _byHash[hash] = entry;
+
+                    if (entry.Kind == ClipboardEntryKind.Image)
+                    {
+                        _imagePayloads[entry.Id] = entry.ImagePath;
+                    }
+                    else
+                    {
+                        _payloads[entry.Id] = item.T!;
+                    }
+
+                    _payloadChars += entry.Length;
+                    _version++;
+                    merged++;
+                }
+
+                // 与快照的 nextId 取最大值，避免后续 Add 撞上历史 id
+                _nextId = Math.Max(_nextId, state.N);
+            }
+        }
+
+        MergeFile(marksPath, marksOrigin: true);
+        MergeFile(historyPath, marksOrigin: false);
+
+        lock (_gate)
+        {
+            _cachedVersion = -1; // 快照缓存作废，下次取数重建
+            Trim();
+        }
+
+        if (merged > 0)
+        {
+            ClipboardListener.Log("merged from disk: " + merged + " new entries, store#" + InstanceId, LogLevel.Info);
+        }
+
+        return merged;
+    }
 }

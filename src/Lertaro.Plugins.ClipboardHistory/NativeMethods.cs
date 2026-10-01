@@ -55,6 +55,14 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern IntPtr GetClipboardData(uint uFormat);
 
+    /// <summary>遍历当前剪贴板上的所有格式：传 0 拿第一个，返回 0 表示结束。仅在 OpenClipboard 之后调用。</summary>
+    [DllImport("user32.dll", SetLastError = true)]
+    internal static extern uint EnumClipboardFormats(uint format);
+
+    /// <summary>查询注册格式（>= 0xC000）的名字；标准格式不适用。返回复制的字符数，0 = 失败。</summary>
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    internal static extern int GetClipboardFormatNameW(uint format, System.Text.StringBuilder sb, int cchMax);
+
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern IntPtr GetForegroundWindow();
 
@@ -81,6 +89,19 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    /// <summary>窗口句柄是否仍然有效。自动粘贴前校验目标窗口没被关掉。</summary>
+    [DllImport("user32.dll", SetLastError = false)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool IsWindow(IntPtr hWnd);
+
+    /// <summary>合成按键（内部即 SendInput）。用于写回后自动补一次 Ctrl+V（Ditto 模式）。</summary>
+    internal const uint KeyeventfKeyup = 0x0002;
+    internal const byte VkControl = 0x11;
+    internal const byte VkV = 0x56;
+
+    [DllImport("user32.dll", SetLastError = false)]
+    internal static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
 
     [DllImport("user32.dll", SetLastError = true)]
     internal static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);

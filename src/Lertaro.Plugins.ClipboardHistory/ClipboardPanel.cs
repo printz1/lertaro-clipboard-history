@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -65,6 +66,7 @@ internal static class ClipboardPanel
 
     private static Popup? _flyout;
     private static ListBoxItem? _flyoutItem;
+    private static ContextMenu? _flyoutMenu;
     private static System.Windows.Threading.DispatcherTimer? _flyoutCloseTimer;
     private static System.Windows.Threading.DispatcherTimer? _flyoutOpenTimer;
     private static ListBoxItem? _openPendingItem;
@@ -140,17 +142,20 @@ internal static class ClipboardPanel
     {
         try
         {
-            var app = Application.Current;
-            if (app is null)
+            // 宿主 App 进程用宿主 UI 线程；hook 进程（无 Application.Current）
+            // 用插件自管的 STA UI 线程 —— 5.8 起热键都落在 hook 进程，
+            // 再退回宿主搜索窗面板就永远弹不出来了
+            var ui = Application.Current?.Dispatcher ?? ClipboardUi.EnsureStarted();
+            if (ui is null)
             {
-                ClipboardListener.Log("no WPF Application available, falling back to search window", LogLevel.Warn);
+                ClipboardListener.Log("no usable dispatcher for panel, falling back to search window", LogLevel.Warn);
                 FallBackToSearchWindow();
                 return;
             }
 
-            if (!app.Dispatcher.CheckAccess())
+            if (!ui.CheckAccess())
             {
-                app.Dispatcher.BeginInvoke(new Action(Toggle));
+                ui.BeginInvoke(new Action(Toggle));
                 return;
             }
 
@@ -193,6 +198,24 @@ internal static class ClipboardPanel
         if (store is null)
         {
             return;
+        }
+
+        // 双进程数据兜底：捕获可能发生在另一个进程（5.8 起 hook 进程持有监听器，
+        // 面板却可能由 App 进程打开，反之亦然），打开前把磁盘快照里的新条目并进来。
+        // 已存在的指纹直接跳过，代价是一次 ~100KB 的 JSON 读取，可忽略。
+        try
+        {
+            var merged = store.MergeFromDisk(
+                Path.Combine(ClipboardSettings.SettingsDirectory, "history.json"),
+                Path.Combine(ClipboardSettings.SettingsDirectory, "marks.json"));
+            if (merged > 0)
+            {
+                ClipboardListener.Log("panel open merged " + merged + " entries from disk snapshot", LogLevel.Info);
+            }
+        }
+        catch (Exception ex)
+        {
+            ClipboardListener.Log("panel open merge failed: " + ex.Message, LogLevel.Warn);
         }
 
         // 记住用户按热键时所在的窗口，复制完把焦点还回去
@@ -1535,15 +1558,16 @@ internal static class ClipboardPanel
 
     private static void ApplyThumbnail(long id, BitmapSource source)
     {
-        var app = Application.Current;
-        if (app is null)
+        // 与 Toggle 同一套调度器选择：hook 进程落到插件自管 UI 线程
+        var ui = Application.Current?.Dispatcher ?? ClipboardUi.EnsureStarted();
+        if (ui is null)
         {
             return;
         }
 
-        if (!app.Dispatcher.CheckAccess())
+        if (!ui.CheckAccess())
         {
-            app.Dispatcher.BeginInvoke(() => ApplyThumbnail(id, source));
+            ui.BeginInvoke(() => ApplyThumbnail(id, source));
             return;
         }
 
@@ -1689,7 +1713,7 @@ internal static class ClipboardPanel
                 return;
             }
 
-            content = new TextBox
+            var textBox = new TextBox
             {
                 Text = text,
                 IsReadOnly = true,
@@ -1701,6 +1725,8 @@ internal static class ClipboardPanel
                 MaxHeight = 404,
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto
             };
+            AttachFlyoutContextMenu(textBox, item);
+            content = textBox;
         }
 
         var host = new Border
@@ -1730,6 +1756,33 @@ internal static class ClipboardPanel
         _flyout.IsOpen = true;
     }
 
+    /// <summary>
+    /// 浮窗文本框的右键菜单（复制/全选）。关键坑：ContextMenu 打开会把鼠标捕获抢到菜单
+    /// （独立弹层），浮窗和条目立刻收到 MouseLeave —— IsMouseOver 因捕获转移而变 false，
+    /// 250ms 关闭定时器就会把浮窗连菜单一起关掉。所以菜单 Opened 时停掉关闭定时器，
+    /// Closed 后再重新评估；关闭判定也必须跳过"菜单开着"的窗口期。
+    /// </summary>
+    private static void AttachFlyoutContextMenu(TextBox textBox, ListBoxItem item)
+    {
+        var menu = new ContextMenu
+        {
+            Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint,
+            FontSize = 12.5,
+            Background = _themeSurface ?? SystemColors.WindowBrush,
+            BorderBrush = _themeBorderBrush ?? SystemColors.ControlDarkBrush,
+            Foreground = _themeText ?? SystemColors.ControlTextBrush
+        };
+
+        menu.Items.Add(NewMenuItem("复制", () => textBox.Copy()));
+        menu.Items.Add(NewMenuItem("全选", () => textBox.SelectAll()));
+
+        menu.Opened += (_, _) => _flyoutCloseTimer?.Stop();
+        menu.Closed += (_, _) => ScheduleFlyoutClose(item);
+
+        textBox.ContextMenu = menu;
+        _flyoutMenu = menu;
+    }
+
     private static void ScheduleFlyoutClose(ListBoxItem owner)
     {
         if (_flyout is null || !ReferenceEquals(_flyoutItem, owner) || !_flyout.IsOpen)
@@ -1747,6 +1800,14 @@ internal static class ClipboardPanel
             _flyoutCloseTimer.Tick += (_, _) =>
             {
                 _flyoutCloseTimer?.Stop();
+
+                // 右键菜单开着时鼠标捕获在菜单上，IsMouseOver 必然是 false —— 不能据此关浮窗；
+                // 定时器停在这里即可，菜单 Closed 后会重新评估
+                if (_flyoutMenu is { IsOpen: true })
+                {
+                    return;
+                }
+
                 if (_flyout is not null && _flyoutItem is not null && !_flyout.IsMouseOver && !_flyoutItem.IsMouseOver)
                 {
                     CloseFlyout();
@@ -1768,6 +1829,7 @@ internal static class ClipboardPanel
 
         _flyout = null;
         _flyoutItem = null;
+        _flyoutMenu = null;
     }
 
     /// <summary>
@@ -2362,7 +2424,7 @@ internal static class ClipboardPanel
         _list.ScrollIntoView(Rows[next].Container);
     }
 
-    private static void CopySelected(ClipboardStore store)
+    private static void CopySelected(ClipboardStore store, bool autoPaste = false)
     {
         // 打字后立刻回车：去抖可能还没触发，先补一次刷新，
         // 确保粘的是过滤结果里当前选中的那条，而不是旧列表的残留选中
@@ -2378,13 +2440,13 @@ internal static class ClipboardPanel
 
         if (entry.Kind == ClipboardEntryKind.Image)
         {
-            CopyImageSelected(entry);
+            CopyImageSelected(entry, autoPaste);
             return;
         }
 
         if (entry.Kind == ClipboardEntryKind.File)
         {
-            CopyFilesSelected(store, entry);
+            CopyFilesSelected(store, entry, autoPaste);
             return;
         }
 
@@ -2411,15 +2473,19 @@ internal static class ClipboardPanel
             _hint.Text = "正在写回，请稍候…";
         }
 
-        Task.Run(() => ClipboardWriter.SetText(text))
+        Task.Run(() =>
+        {
+            ClipboardWriter.SetText(text, out var issue);
+            return issue; // null = 写入成功
+        })
             .ContinueWith(t =>
             {
                 _copyBusy = false;
-                if (!t.Result)
+                if (t.Result is not null)
                 {
                     if (_hint is not null)
                     {
-                        _hint.Text = "写入剪贴板失败，请再试一次";
+                        _hint.Text = "写入剪贴板失败：" + t.Result;
                     }
 
                     return;
@@ -2427,7 +2493,14 @@ internal static class ClipboardPanel
 
                 ClipboardListener.Log("copied back from panel: " + text.Length + " chars", LogLevel.Info);
                 _window?.Close();
-                ReturnFocusToPreviousWindow();
+                if (autoPaste)
+                {
+                    PasteIntoPreviousWindow();
+                }
+                else
+                {
+                    ReturnFocusToPreviousWindow();
+                }
             }, TaskScheduler.FromCurrentSynchronizationContext());
     }
 
@@ -2435,7 +2508,7 @@ internal static class ClipboardPanel
     /// 文件条目回写：负载是换行分隔的路径清单；写回时剔除已不存在的文件，
     /// 全部失效则提示。成功的场合若部分失效，把说明留在 hint 里。
     /// </summary>
-    private static void CopyFilesSelected(ClipboardStore store, ClipboardIndexEntry entry)
+    private static void CopyFilesSelected(ClipboardStore store, ClipboardIndexEntry entry, bool autoPaste = false)
     {
         var pathList = store.TryGetText(entry.Id);
         if (string.IsNullOrEmpty(pathList))
@@ -2461,14 +2534,21 @@ internal static class ClipboardPanel
 
         ClipboardListener.Log("copied file list back from panel: " + paths.Length + " path(s)", LogLevel.Info);
         _window?.Close();
-        ReturnFocusToPreviousWindow();
+        if (autoPaste)
+        {
+            PasteIntoPreviousWindow();
+        }
+        else
+        {
+            ReturnFocusToPreviousWindow();
+        }
     }
 
     /// <summary>
     /// 图片写回：PNG 解码 + BMP 重编码在后台线程做（大图几百毫秒，不能卡 UI），
     /// 完成后回 UI 线程写剪贴板并关窗还原焦点。防重入：写回期间再按 Enter 无效。
     /// </summary>
-    private static void CopyImageSelected(ClipboardIndexEntry entry)
+    private static void CopyImageSelected(ClipboardIndexEntry entry, bool autoPaste = false)
     {
         if (_copyBusy)
         {
@@ -2520,11 +2600,18 @@ internal static class ClipboardPanel
 
                 ClipboardListener.Log("copied image back from panel: " + ClipboardIndexEntry.FormatBytes(dib.Length), LogLevel.Info);
                 _window?.Close();
-                ReturnFocusToPreviousWindow();
+                if (autoPaste)
+                {
+                    PasteIntoPreviousWindow();
+                }
+                else
+                {
+                    ReturnFocusToPreviousWindow();
+                }
             }, TaskScheduler.FromCurrentSynchronizationContext());
     }
 
-    /// <summary>把焦点还给用户按热键时所在的窗口，这样可以直接 Ctrl+V。</summary>
+    /// <summary>仅写回模式：把焦点还给用户按热键时所在的窗口，Ctrl+V 由用户自己按。</summary>
     private static void ReturnFocusToPreviousWindow()
     {
         if (_previousForeground == IntPtr.Zero)
@@ -2540,6 +2627,60 @@ internal static class ClipboardPanel
         {
             ClipboardListener.Log("could not restore previous foreground window: " + ex.Message, LogLevel.Debug);
         }
+    }
+
+    /// <summary>
+    /// 真粘贴（Ditto 模式，仅右键菜单「粘贴到刚才的窗口」触发）：写回成功后切回用户
+    /// 按热键时所在的窗口，等焦点真正落位，再补一次 Ctrl+V。安全降级：目标窗口已关、
+    /// 或焦点始终切不过去（Windows 前台锁/目标是管理员权限窗口被 UIPI 拦）时
+    /// 不发按键，只保留写回结果，用户自己 Ctrl+V，绝不粘进错误的窗口。
+    /// </summary>
+    private static void PasteIntoPreviousWindow()
+    {
+        var target = _previousForeground;
+        if (target == IntPtr.Zero)
+        {
+            return;
+        }
+
+        // 后台线程做：SetForegroundWindow + 轮询等待 + 按键合成，整个过程最长 ~400ms，不能卡 UI
+        Task.Run(() =>
+        {
+            try
+            {
+                if (!NativeMethods.IsWindow(target))
+                {
+                    ClipboardListener.Log("auto paste skipped: previous window is gone", LogLevel.Info);
+                    return;
+                }
+
+                _ = NativeMethods.SetForegroundWindow(target);
+
+                // 焦点动画/前台锁需要时间，轮询等它真正到位（最多 ~300ms）
+                var focused = NativeMethods.GetForegroundWindow() == target;
+                for (var i = 0; i < 15 && !focused; i++)
+                {
+                    Thread.Sleep(20);
+                    focused = NativeMethods.GetForegroundWindow() == target;
+                }
+
+                if (!focused)
+                {
+                    ClipboardListener.Log("auto paste skipped: foreground did not return to target window", LogLevel.Info);
+                    return;
+                }
+
+                NativeMethods.keybd_event(NativeMethods.VkControl, 0, 0, UIntPtr.Zero);
+                NativeMethods.keybd_event(NativeMethods.VkV, 0, 0, UIntPtr.Zero);
+                NativeMethods.keybd_event(NativeMethods.VkV, 0, NativeMethods.KeyeventfKeyup, UIntPtr.Zero);
+                NativeMethods.keybd_event(NativeMethods.VkControl, 0, NativeMethods.KeyeventfKeyup, UIntPtr.Zero);
+                ClipboardListener.Log("auto pasted into previous window", LogLevel.Debug);
+            }
+            catch (Exception ex)
+            {
+                ClipboardListener.Log("auto paste failed: " + ex.Message, LogLevel.Warn);
+            }
+        });
     }
 
     private static void TogglePin(ClipboardStore store)
@@ -2713,7 +2854,7 @@ internal static class ClipboardPanel
             Foreground = _themeText ?? SystemColors.ControlTextBrush
         };
 
-        menu.Items.Add(NewMenuItem("粘贴到刚才的窗口", () => CopySelected(store)));
+        menu.Items.Add(NewMenuItem("粘贴到刚才的窗口", () => CopySelected(store, autoPaste: true)));
 
         menu.Items.Add(NewMenuItem(entry.IsFavorite ? "取消收藏" : "收藏", () =>
         {

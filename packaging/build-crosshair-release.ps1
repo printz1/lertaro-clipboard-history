@@ -71,8 +71,7 @@ $pluginDir = Join-Path $stage $pluginName
 New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
 
 Copy-Item $dll $pluginDir -Force
-$pdb = Join-Path $binDir "$pluginName.pdb"
-if (Test-Path $pdb) { Copy-Item $pdb $pluginDir -Force }
+# PDB is intentionally not shipped: it embeds absolute source paths of the build machine.
 
 Copy-Item (Join-Path $PSScriptRoot 'crosshair\install.ps1') $stage -Force
 Copy-Item (Join-Path $PSScriptRoot 'crosshair\README.md') $stage -Force

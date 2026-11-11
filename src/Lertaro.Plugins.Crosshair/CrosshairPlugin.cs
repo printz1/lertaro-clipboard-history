@@ -304,7 +304,9 @@ public sealed class CrosshairPlugin : IPlugin, IInstantResultProvider, IActionPr
     {
         var current = CrosshairSettings.Current;
         _staged = current.Clone();
-        return CrosshairConfigSchema.Build(current, _staged, ApplyStaged, DiscardStaged);
+        // 传取值函数而不是实例：宿主可能多次调用 GetConfigSchema，闭包必须绑定"当前"暂存对象，
+        // 否则改动会落在旧对象上、保存时读到新对象，表现为"第一次点保存没反应"。
+        return CrosshairConfigSchema.Build(current, () => _staged ?? current, ApplyStaged, DiscardStaged);
     }
 
     private static void ApplyStaged()
